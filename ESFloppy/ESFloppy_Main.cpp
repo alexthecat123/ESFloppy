@@ -1,10 +1,39 @@
 #include <Arduino.h>
 #include "SdFat.h"
-#include "diskLib.cpp"
-#include "GCRLib.cpp"
-#include "GPIO.cpp"
-#include "RMT.cpp"
+#include "diskLib.h"
+#include "GCRLib.h"
+#include "GPIO.h"
+#include "RMT.h"
 #include "types.h"
+
+// Lookup table for number of sectors per track for each of the 80 tracks on a standard 400K/800K floppy
+uint32_t sectorsPerTrack[80] = {
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, // Tracks 0-15
+    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, // Tracks 16-31
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, // Tracks 32-47
+    9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9, // Tracks 48-63
+    8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8, // Tracks 64-79
+};
+
+// Another LUT for the tachometer pulse frequency that's needed for each track
+// Are these right? One source (the 800K drive spec) says this, another (the 400K spec) is slightly different...
+// And I can't find the final source, but I got something from somewhere else that breaks it down quite differently:
+/*
+    Track/RPM pairings
+    0...9 363
+    10...25 393
+    26...40 429
+    41...55 472
+    56...71 524
+    72...79 590
+*/
+uint32_t tachPulsesPerTrack[80] = {
+    394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, // Tracks 0-15
+    429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, // Tracks 16-31
+    472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, // Tracks 32-47
+    525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, // Tracks 48-63
+    578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, // Tracks 64-79
+};
 
 // Watchdog timer write enable register and value
 #define TIMG1_WDT_WE 0x050D83AA1
@@ -21,14 +50,6 @@ SdFat32 SDCard; // The SD card object
 File32 disk; // The disk image that ESFloppy is using
 FatFile rootDir; // The root directory of the SD card
 
-// Oh no, whenever we eject the disk we're going to have to update the data and tag checksums to their new values
-// open_dc42 function:
-    // parse full header into struct, then check the following and fail on error:
-        // file is big enough to fit the tag/data sizes specified in the header
-// then we need to derive a formula to compute the file offsets of the data and tag blocks based on the header info
-// otherwise it's a raw image, but how do raw images work? apparently they can't have tags???
-
-
 static DecodedSector trackBufferDecoded[2][12]; // Buffer for decoded sectors for each side of the disk (2 sides, max 12 sectors per track)
 static GcrSector trackBufferGCR[2][12]; // Buffer for GCR-encoded sectors for each side of the disk
 
@@ -36,10 +57,11 @@ static GcrSector trackBufferGCR[2][12]; // Buffer for GCR-encoded sectors for ea
 uint32_t currentSector = 2; // Start with sector 2 since we preloaded sectors 0 and 1
 uint32_t inSectorIndex = 0;
 uint32_t rmtBufferIndex = 0;
+uint8_t currentTrack = 0;
 bool loadZero = false;
 bool loadOne = false;
 
-static RMTSector trackBufferRMT[2][2]; // Double-sided double buffer for RMT sectors
+//static RMTSector trackBufferRMT[2][2]; // Double-sided double buffer for RMT sectors // [2][2]
 
 DiskImageMetadata diskMetadata;
 
@@ -47,10 +69,10 @@ DiskImageMetadata diskMetadata;
 // We call it whenever we open a new disk image or step to a new track to ensure that the RMT has data to send right away
 void preloadSectors() {
     // First, encode those two sectors on each side into GCR format and stick them in the RMT buffer
-    convertGCRToRMT(&trackBufferGCR[0][0], &trackBufferRMT[0][0]); // Preload the first sector on side 0
-    convertGCRToRMT(&trackBufferGCR[0][1], &trackBufferRMT[0][1]); // And the second
-    convertGCRToRMT(&trackBufferGCR[1][0], &trackBufferRMT[1][0]); // Preload the first sector on side 1
-    convertGCRToRMT(&trackBufferGCR[1][1], &trackBufferRMT[1][1]); // And the second
+    //convertGCRToRMT(&trackBufferGCR[0][0], &trackBufferRMT[0][0]); // Preload the first sector on side 0
+    //convertGCRToRMT(&trackBufferGCR[0][1], &trackBufferRMT[0][1]); // And the second
+    //convertGCRToRMT(&trackBufferGCR[1][0], &trackBufferRMT[1][0]); // Preload the first sector on side 1
+    //convertGCRToRMT(&trackBufferGCR[1][1], &trackBufferRMT[1][1]); // And the second
     // Now clear out the state of the RMT so it starts sending from the beginning of sector 0 on side 0
     currentSector = 2; // Reset the current sector to 2 since we preloaded sectors 0 and 1
     inSectorIndex = 0; // And the in-sector index to 0
@@ -85,14 +107,14 @@ void transmitTrack(bool side) {
                 }
                 // Then increment the current sector, wrapping back to 0 if we reach the end of the track
                 currentSector++;
-                if (currentSector >= 12) {
+                if (currentSector >= sectorsPerTrack[currentTrack]) {
                     currentSector = 0;
                 }
                 // And reset the in-sector index since we just started a new one
                 inSectorIndex = 0;
             }
             // Actually copy the data now, making sure to select the correct side's buffer
-            REG_WRITE(RMT_CH0_FIFO, *((uint32_t*)&trackBufferRMT[side][rmtBufferIndex].data[inSectorIndex++]));
+            //REG_WRITE(RMT_CH0_FIFO, *((uint32_t*)&trackBufferRMT[side][rmtBufferIndex].data[inSectorIndex++]));
         }
         // Now that we've copied the data, we can check if we need to load the next sector into the other buffer
         // It's the same for buffers zero or one, just with different trackBufferRMT indices
@@ -100,13 +122,13 @@ void transmitTrack(bool side) {
         // If it's not actually a double-sided disk, then who cares, we'll get garbage RMT data for side 1 which will simulate reading the wrong side of a 400K disk pretty well
         if (loadZero) {
             loadZero = false;
-            convertGCRToRMT(&trackBufferGCR[0][currentSector], &trackBufferRMT[0][0]);
-            convertGCRToRMT(&trackBufferGCR[1][currentSector], &trackBufferRMT[1][0]);
+            //convertGCRToRMT(&trackBufferGCR[0][currentSector], &trackBufferRMT[0][0]);
+            //convertGCRToRMT(&trackBufferGCR[1][currentSector], &trackBufferRMT[1][0]);
         }
         else if (loadOne) {
             loadOne = false;
-            convertGCRToRMT(&trackBufferGCR[0][currentSector], &trackBufferRMT[0][1]);
-            convertGCRToRMT(&trackBufferGCR[1][currentSector], &trackBufferRMT[1][1]);
+            //convertGCRToRMT(&trackBufferGCR[0][currentSector], &trackBufferRMT[0][1]);
+            //convertGCRToRMT(&trackBufferGCR[1][currentSector], &trackBufferRMT[1][1]);
         }
     }
 }
@@ -119,29 +141,51 @@ void setup() {
     REG_CLR_BIT(TIMG1_WDT_CONF_REG, TIMG1_WDT_EN); // And clear the timer's enable bit to disable it
     //noInterrupts(); // Now that it's safe to do so, disable interrupts for the rest of the program
     Serial.begin(115200); // Start serial comms for debugging
-
+    Serial.println("Starting ESFloppy...");
     initRMT(); // Initialize the RMT peripheral for floppy data transmission
     GPIOControl(); // Give the GPIO (not RMT) control over the RDA pin initially
-
     SD_SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); // Start comms with the SD card using our hardware SPI instance
-    initPins(); // Set all of ESFloppy's pins to the correct direction and state
+    //initPins(); // Set all of ESFloppy's pins to the correct direction and state
     if (!SDCard.begin(SD_CONFIG)) { // Initialize the SD card with our hardware SPI instance
         Serial.println("SD card initialization failed! Halting..."); // And print an error/go into an infinite loop on failure
         while(1);
     }
     rootDir.open("/"); // Then open the card's root directory
-    if (!openImage("test.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
-        //Serial.println("Disk image file test.dc42 not found! Halting..."); // Give another error/infinite loop on failure
+    if (!openImage("800k_mw2install.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
+        Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
         while(1); // If we fail to open the image, just hang here
     }
     // Now do a test read and write of track 0
     readTrack(0, &disk, trackBufferDecoded, &diskMetadata); // Read track 0 into the decoded buffer
+    // Now print out the contents of every sector (on both sides of the disk) for debugging, and divide it up by side and sector
+    /*for (int side = 0; side < 2; side++) {
+        for (int sector = 0; sector < sectorsPerTrack[0]; sector++) {
+            Serial.print("Side ");; Serial.print(side); Serial.print(", Sector "); Serial.print(sector); Serial.println(":");
+            for (int i = 0; i < 524; i++) {
+                if (i % 16 == 0) {
+                    Serial.println(); // New line every 16 bytes
+                }
+                uint8_t byteToPrint = trackBufferDecoded[side][sector].data[i];
+                if (byteToPrint < 0x10) {
+                    Serial.print("0"); // Leading zero for single-digit values
+                }
+                Serial.print(byteToPrint, HEX); Serial.print(" ");
+            }
+            Serial.println(); Serial.println(); // Two new lines after each sector
+        }
+    }*/
+    encodeTrackToGCR(0, trackBufferDecoded, trackBufferGCR, &diskMetadata);
     preloadSectors(); // Preload sectors 0 and 1 of both sides into the RMT buffers
     // For testing purposes, let's modify sector 0's data a bit
-    for (int i = 0; i < 256; i++) {
-        trackBufferDecoded[0][0].data[12 + i] ^= 0xFF; // Invert the first 256 bytes of sector 0's data
-    }
-    writeTrack(0, &disk, trackBufferDecoded, &diskMetadata); // Write the modified track back to the disk image
+    // Invert all 524 bytes of all the sectors on both sides of track 0
+    /*for (int side = 0; side < 2; side++) {
+        for (int sector = 0; sector < sectorsPerTrack[0]; sector++) {
+            for (int i = 0; i < 524; i++) {
+                trackBufferDecoded[side][sector].data[i] = ~trackBufferDecoded[side][sector].data[i];
+            }
+        }
+    }*/
+    //writeTrack(0, &disk, trackBufferDecoded, &diskMetadata); // Write the modified track back to the disk image
     closeImage(&disk, &diskMetadata); // Close the image
     Serial.println("ESFloppy is ready!"); // If all this succeeds, print a ready message
 }
@@ -153,11 +197,12 @@ bool currLSTRB = 0;
 StepDirection stepDirection = OUT;
 bool stepComplete = true;
 bool motorOn = false;
-uint8_t currentTrack = 0;
 
 bool ejectPending = false;
 uint16_t ejectStartTime;
 uint32_t tachFreq = 0;
+
+bool dirty = false;
 
 void loop() {
     // Don't do anything unless the drive is enabled (DR1 low)
@@ -256,7 +301,14 @@ void loop() {
                 case 2: // /STEP register (host sets low to step heads, drive sets high when step is complete)
                     if (regData == 0 && stepComplete == true) { // If the host is trying to step the heads and we're not already in the middle of a step
                         stepComplete = false; // Mark that a step is in progress
-                        // Now we need to actually perform the step
+                        // Before we step, check the dirty bit to see if the current track was modified
+                        if (dirty == true) {
+                            // If so, write the current track back to the disk image before we seek away
+                            decodeTrackFromGCR(currentTrack, trackBufferGCR, trackBufferDecoded, &diskMetadata);
+                            writeTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata);
+                            dirty = false; // And clear the dirty bit
+                        }
+                        // Now we can actually perform the step
                         if (stepDirection == IN) { // If stepping IN, decrement the track
                             if (currentTrack > 0) {
                                 currentTrack--;
@@ -267,8 +319,9 @@ void loop() {
                                 currentTrack++;
                             }
                         }
-                        // Now that we've updated the track number, we need to read in all the sectors for this track from the disk image
+                        // Now that we've updated the track number, we need to read in all the sectors for this new track from the disk image
                         readTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata);
+                        encodeTrackToGCR(currentTrack, trackBufferDecoded, trackBufferGCR, &diskMetadata);
                         // And preload a couple sectors into our RMT buffer to get ready for reading
                         preloadSectors();
                         stepComplete = true; // Once they're read in, mark that the step is complete
@@ -343,3 +396,20 @@ void loop() {
 // Since we have two RMTSectors worth of RAM, one of the sectors can be feeding the RMT while the other is being prepared
 // So let's do that now
 
+// Procedure for writes/formats:
+// Writing doesn't care what register is being accessed; as long as the drive is enabled and WRQ is low, we write whatever's on WRD
+// So in our main loop, inside, the "if drive enabled" block, we just need to check if WRQ is low
+// If it is, call a function that reads data from a receiving RMT channel hooked to WRD
+// So of course we'll need to set up an RMT channel for receiving data on WRD somewhere during initialization
+// In this function, we'll do nothing unless the RMT's receive buffer is full, in which case we read all the RMTDataItems from it
+// Then we need to scan through that data to find the GCR sync marks that indicate the start of a sector
+// Once we find them, check if it's a header or data field
+// If it's a header, then the host is trying to do a format op, so figure out which sector it's for
+// So figure out which sector it's for and save the Format byte to that sector's header in the GCRSector struct
+// If it's a data field, then the host is writing sector data (either as part of a format or a normal write op)
+// So figure out which sector it's for (by looking at the last header we passed over) according to currentSector - 2 or something
+// And decode the data and stick it in that sector's data array in the GCRSector struct
+// If the host was doing a format, make sure to update currentSector to whatever sector the host tried to format so that it writes data to that sector next
+// When WRQ goes high again, detect that edge and call the write function one more time; we need to read any residual data in the RMT receive buffer
+// Process that data (it's probably the end of a sector) the same way as before
+// And then set the dirty bit before returning to the main loop

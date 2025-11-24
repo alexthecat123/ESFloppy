@@ -223,28 +223,13 @@ void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
 // This function encodes an entire decoded track (all sectors) into GCR format
 // It takes the track number and a pointer to an array of DecodedSector structs as input
 // And outputs an array of GcrSector structs
-void encodeTrackToGCR(uint8_t track, DriveType driveType, DecodedSector decodedSectors[2][12], GcrSector gcrSectors[2][12]) {
+void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][12], GcrSector gcrSectors[2][12], DiskImageMetadata* metadata) {
     uint32_t startTime = micros();
     // First we need to figure out how many sectors are on this track
-    uint8_t sectorCount = 0;
-    if (track <= 15) {
-        sectorCount = 12;
-    }
-    else if (track <= 31) {
-        sectorCount = 11;
-    }
-    else if (track <= 47) {
-        sectorCount = 10;
-    }
-    else if (track <= 63) {
-        sectorCount = 9;
-    }
-    else {
-        sectorCount = 8;
-    }
+    uint32_t sectorCount = sectorsPerTrack[track];
     // Now encode each sector into GCR format and put it in the output array
     // If it's a double-sided disk, we have to do both sides
-    if (driveType == Drive800) {
+    if (metadata->driveType == Drive800) {
         for(int i = 0; i < 2; i++) {
             for (int j = 0; j < sectorCount; j++) {
                 encodeSector(&decodedSectors[i][j], &gcrSectors[i][j]);
@@ -258,4 +243,27 @@ void encodeTrackToGCR(uint8_t track, DriveType driveType, DecodedSector decodedS
         }
     }
     Serial.printf("Track encoding to GCR took %u microseconds\n", micros() - startTime);
+}
+
+// This function decodes an entire GCR track (all sectors) into decoded format
+void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSector decodedSectors[2][12], DiskImageMetadata* metadata) {
+    uint32_t startTime = micros();
+    // First we need to figure out how many sectors are on this track
+    uint32_t sectorCount = sectorsPerTrack[track];
+    // Now decode each sector from GCR format into decoded format
+    // If it's a double-sided disk, we have to do both sides
+    if (metadata->driveType == Drive800) {
+        for(int i = 0; i < 2; i++) {
+            for (int j = 0; j < sectorCount; j++) {
+                decodeSector(&gcrSectors[i][j], &decodedSectors[i][j]);
+            }
+        }
+    }
+    // Otherwise it's a single-sided disk, so just do side 0
+    else {
+        for (int i = 0; i < sectorCount; i++) {
+            decodeSector(&gcrSectors[0][i], &decodedSectors[0][i]);
+        }
+    }
+    Serial.printf("Track decoding from GCR took %u microseconds\n", micros() - startTime);
 }

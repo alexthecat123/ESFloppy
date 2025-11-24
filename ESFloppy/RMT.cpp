@@ -2,24 +2,6 @@
 #include "types.h"
 // This file contains everything related to controlling the RMT peripheral that we use for sending/receiving the floppy bitstream
 
-// Addresses for all the RMT-related registers
-#define RMT_BASE 0x60016000
-#define SYSTEM_BASE 0x600C0000
-#define GPIO_BASE 0x60004000
-
-#define RMT_CH0_FIFO RMT_BASE
-#define RMT_CH0CONF0_REG (RMT_BASE + 0x20)
-#define RMT_CH0STATUS_REG (RMT_BASE + 0x50)
-#define RMT_SYS_CONF_REG (RMT_BASE + 0xC0)
-#define RMT_INT_RAW_REG (RMT_BASE + 0x70)
-#define RMT_INT_CLR_REG (RMT_BASE + 0x7C)
-#define RMT_CH0_TX_LIM_REG (RMT_BASE + 0xA0)
-
-#define SYSTEM_PERIP_CLK_EN0_REG (SYSTEM_BASE + 0x18)
-#define SYSTEM_PERIP_RST_EN0_REG (SYSTEM_BASE + 0x20)
-
-#define GPIO_FUNC4_OUT_SEL_CFG_REG (GPIO_BASE + 0x564)
-
 // GCR is 1 bit every 2us so this is what we need to set the RMT for
 // A 1 bit is represented by a falling edge on RDA; raise it 1us later (halfway thru the 2us bit time) to prep for the next bit
 // A 0 bit is represented by no falling edge on RDA; just keep it high for the full 2us bit time
@@ -87,44 +69,6 @@ void initRMT() {
 
     // And finally, initialize the lookup table of bit patterns for GCR to RMT conversion
     initBitPatterns();
-}
-
-// Starts an RMT transmission by setting the RMT_TX_START_CH0 bit
-inline __attribute__((__always_inline__)) void startRMT() {
-    // Don't forget to set the CONF_UPDATE bit first
-    REG_SET_BIT(RMT_CH0CONF0_REG, 1 << 24);
-    REG_SET_BIT(RMT_CH0CONF0_REG, 1 << 0);
-}
-
-// Stops an RMT transmission by setting the RMT_TX_STOP_CH0 bit
-inline __attribute__((__always_inline__)) void stopRMT() {
-    // Set the CONF_UPDATE bit first
-    REG_SET_BIT(RMT_CH0CONF0_REG, 1 << 24);
-    REG_SET_BIT(RMT_CH0CONF0_REG, 1 << 7);
-}
-
-// Returns the status of the RMT_CH0_TX_THR_EVENT_INT_RAW bit
-inline __attribute__((__always_inline__)) bool rmtNeedsData() {
-    return (REG_READ(RMT_INT_RAW_REG) & (1 << 8)) != 0;
-}
-
-// Clears the RMT_CH0_TX_THR_EVENT_INT_RAW bit
-inline __attribute__((__always_inline__)) void clearRMTInt() {
-    REG_SET_BIT(RMT_INT_CLR_REG, 1 << 8);
-}
-
-// Gives the RMT control over the RDA pin
-inline __attribute__((__always_inline__)) void RMTControl() {
-    // Route RMT channel 0 to GPIO4 (RDA pin)
-    REG_WRITE(GPIO_FUNC4_OUT_SEL_CFG_REG, ((REG_READ(GPIO_FUNC4_OUT_SEL_CFG_REG) & 0xFFFFFE00) | 81));
-    // Print out GPIO_FUNC4_OUT_SEL_CFG_REG in binary to verify our settings
-    Serial.printf("GPIO_FUNC4_OUT_SEL_CFG_REG: %x\n", REG_READ(GPIO_FUNC4_OUT_SEL_CFG_REG));
-}
-
-// Gives GPIO control over the RDA pin
-inline __attribute__((__always_inline__)) void GPIOControl() {
-    // Route GPIO4 to normal GPIO function
-    REG_WRITE(GPIO_FUNC4_OUT_SEL_CFG_REG, ((REG_READ(GPIO_FUNC4_OUT_SEL_CFG_REG) & 0xFFFFFE00) | 256));
 }
 
 // This function converts a GcrSector into its corresponding RMTSector

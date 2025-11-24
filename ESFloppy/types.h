@@ -13,10 +13,10 @@
 #define PH2 10
 #define PH1 11
 #define PH0 12
-#define SD_SCK 13
-#define SD_MOSI 14
-#define SD_MISO 15
-#define SD_CS 16
+#define SD_SCK 5 //13
+#define SD_MOSI 2 //14
+#define SD_MISO 34 //15
+#define SD_CS 33 //16
 #define MT1 17
 #define MT0 18
 #define DR1 21
@@ -38,34 +38,27 @@
 #define TAG_SIZE_400K 9600
 #define TAG_SIZE_800K 19200
 
-// Lookup table for number of sectors per track for each of the 80 tracks on a standard 400K/800K floppy
-uint32_t sectorsPerTrack[80] = {
-    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, // Tracks 0-15
-    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, // Tracks 16-31
-    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, // Tracks 32-47
-    9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9,  9, // Tracks 48-63
-    8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8, // Tracks 64-79
-};
+// Addresses for all the RMT-related registers
+#define RMT_BASE 0x60016000
+#define SYSTEM_BASE 0x600C0000
+#define GPIO_BASE 0x60004000
 
-// Another LUT for the tachometer pulse frequency that's needed for each track
-// Are these right? One source (the 800K drive spec) says this, another (the 400K spec) is slightly different...
-// And I can't find the final source, but I got something from somewhere else that breaks it down quite differently:
-/*
-    Track/RPM pairings
-    0...9 363
-    10...25 393
-    26...40 429
-    41...55 472
-    56...71 524
-    72...79 590
-*/
-uint32_t tachPulsesPerTrack[80] = {
-    394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, // Tracks 0-15
-    429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, // Tracks 16-31
-    472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, // Tracks 32-47
-    525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, // Tracks 48-63
-    578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, // Tracks 64-79
-};
+#define RMT_CH0_FIFO RMT_BASE
+#define RMT_CH0CONF0_REG (RMT_BASE + 0x20)
+#define RMT_CH0STATUS_REG (RMT_BASE + 0x50)
+#define RMT_SYS_CONF_REG (RMT_BASE + 0xC0)
+#define RMT_INT_RAW_REG (RMT_BASE + 0x70)
+#define RMT_INT_CLR_REG (RMT_BASE + 0x7C)
+#define RMT_CH0_TX_LIM_REG (RMT_BASE + 0xA0)
+
+#define SYSTEM_PERIP_CLK_EN0_REG (SYSTEM_BASE + 0x18)
+#define SYSTEM_PERIP_RST_EN0_REG (SYSTEM_BASE + 0x20)
+
+#define GPIO_FUNC4_OUT_SEL_CFG_REG (GPIO_BASE + 0x564)
+
+// Lookup tables for the number of sectors per track and tachometer pulses per track
+extern uint32_t sectorsPerTrack[80];
+extern uint32_t tachPulsesPerTrack[80];
 
 // A decoded sector is super simple: just the track, sector, side, format, and 524 bytes of data
 // The only one of these that even needs explanation is the format byte, which is as follows:

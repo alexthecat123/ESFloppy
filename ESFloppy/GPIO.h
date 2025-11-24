@@ -1,6 +1,9 @@
-#include <Arduino.h>
+// Header file for GPIO functions
 #include "types.h"
-// This file contains all the GPIO-related functions for ESFloppy
+
+// All of these functions except initPins are inline to maximize speed
+// And since they're inline, we have to both declare AND define them here in the header file
+// We'll define initPins here too, just to avoid having a separate GPIO.cpp file for a single function
 
 // All this code is stolen almost verbatim from ESProFile, just with the pins changed
 // They're all inline functions to maximize speed

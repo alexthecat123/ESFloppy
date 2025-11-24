@@ -4,6 +4,64 @@
 
 // Contains all the disk image handling routines for ESFloppy
 
+// These two buffers will be used to hold raw data and tags straight from the image on the SD card
+// Once it's in the buffers, then we can format it into our DecodedSector structs (or whatever)
+// It's way quicker to read all the data from the card at once into a buffer than to do multiple small reads
+static uint8_t rawDataBuffer[12288];
+static uint8_t rawTagBuffer[288];
+
+// Calculates and returns the data checksum for a DC42 image
+__attribute__((optimize("Ofast"))) uint32_t calcDataChecksum(File32* disk, DiskImageMetadata* metadata) {
+    // The checksum algorithm is pretty darn simple: start with a 32-bit accumulator at 0
+    // Then add each 16-bit BIG ENDIAN!!!! word of the data to the accumulator
+    // And then rotate the accumulator right by 1 bit
+    uint32_t dataChecksum = 0;
+    // Now loop over all the sector data in 12288-byte chunks
+    for (uint32_t offset = 0; offset < metadata->header.dataSize; offset += 12288) {
+        // Seek to the proper spot in the disk image
+        disk->seekSet(sizeof(DC42Header) + offset);
+        // And now figure out how many bytes we should actually read
+        // It might be less than 12288 if we're on the last iteration and the data size isn't a multiple of 12288
+        uint32_t bytesToRead = min((uint32_t)12288, metadata->header.dataSize - offset);
+        // Now go ahead and read that many bytes into our buffer
+        disk->read(rawDataBuffer, bytesToRead);
+        // We've got the data, so now compute the checksum over it
+        for (uint32_t i = 0; i < bytesToRead; i += 2) {
+            uint32_t word = (rawDataBuffer[i] << 8) | rawDataBuffer[i + 1]; // Combine two bytes into a big-endian word
+            dataChecksum += word; // Add the word to the checksum
+            dataChecksum = (dataChecksum >> 1) | (dataChecksum << 31); // Rotate the checksum right by 1 bit
+        }
+    }
+    return dataChecksum; // Finally, return the computed checksum
+}
+
+// Calculates and returns the tag checksum for a DC42 image
+__attribute__((optimize("Ofast"))) uint32_t calcTagChecksum(File32* disk, DiskImageMetadata* metadata) {
+    // The tag checksum is the same, just we iterate over the tag data instead of the regular data
+    // And apparently there was a bug in the original DC42 implementation where the first 12 tag bytes were skipped in the checksum
+    // For the sake of compatibility, that convention has been preserved ever since, and so we'll do it here too
+    uint32_t tagChecksum = 0;
+    // First, make sure the image actually has tags; if not, we just leave the tag checksum as 0
+    if (metadata->tagsPresent) {
+        // Note that we're starting the offset at 12 to skip the first 12 tag bytes
+        for (uint32_t offset = 12; offset < metadata->header.tagSize; offset += 12288) {
+            // Seek to the proper spot in the disk image
+            disk->seekSet(sizeof(DC42Header) + metadata->header.dataSize + offset);
+            // Figure out how many bytes to read just like before
+            uint32_t bytesToRead = min((uint32_t)12288, metadata->header.tagSize - offset);
+            // Read that many bytes into our buffer
+            disk->read(rawDataBuffer, bytesToRead);
+            // And compute the checksum over the tag data
+            for (uint32_t i = 0; i < bytesToRead; i += 2) {
+                uint32_t word = (rawDataBuffer[i] << 8) | rawDataBuffer[i + 1]; // Combine two bytes into a big-endian word
+                tagChecksum += word; // Add the word to the checksum
+                tagChecksum = (tagChecksum >> 1) | (tagChecksum << 31); // Rotate the checksum right by 1 bit
+            }
+        }
+    }
+    return tagChecksum; // Return our checksum
+}
+
 // This function opens a disk image file and determines its type (raw or DC42)
 // If there are any errors, it returns false; otherwise, it returns true
 bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
@@ -16,6 +74,15 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
     if(disk->fileSize() >= sizeof(DC42Header)) { // Make sure the file is big enough to contain a DC42 header
         disk->seekSet(0); // Seek to the start of the file
         disk->read(&metadata->header, sizeof(DC42Header)); // And read the header into our struct
+
+        // A problem: the fields in the header are big-endian, but the ESP32 is little-endian
+        // So we need to swap the byte order of the multi-byte fields
+        metadata->header.dataSize = __builtin_bswap32(metadata->header.dataSize);
+        metadata->header.tagSize = __builtin_bswap32(metadata->header.tagSize);
+        metadata->header.dataChecksum = __builtin_bswap32(metadata->header.dataChecksum);
+        metadata->header.tagChecksum = __builtin_bswap32(metadata->header.tagChecksum);
+        metadata->header.dc42Magic = __builtin_bswap16(metadata->header.dc42Magic);
+
         if(metadata->header.dc42Magic == 0x0100) { // If the magic number is 0x0100, then it's a DC42 image
             metadata->imageType = DC42; // Set imageType to DC42
             Serial.println("Opened DC42 disk image!");
@@ -42,7 +109,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
                     Serial.println("No tags are present in this image.");
                 }
                 else {
-                    Serial.println("ERROR: Invalid tag size for 400K DC42 image!");
+                    Serial.printf("ERROR: Invalid tag size for 400K DC42 image; tag size is %d bytes!\n", metadata->header.tagSize);
                     return false;
                 }
             }
@@ -58,14 +125,33 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
                     Serial.println("No tags are present in this image.");
                 }
                 else {
-                    Serial.println("ERROR: Invalid tag size for 800K DC42 image!");
+                    Serial.printf("ERROR: Invalid tag size for 800K DC42 image; tag size is %d bytes!\n", metadata->header.tagSize);
                     return false;
                 }
             }
             else {
-                Serial.println("ERROR: Invalid disk encoding or data size for DC42 image!");
+                Serial.printf("ERROR: Invalid disk encoding or data size for DC42 image; encoding is %02x and data size is %d bytes!\n", metadata->header.diskEncoding, metadata->header.dataSize);
                 return false;
             }
+
+            // Now calculate and verify the data and tag checksums
+            uint32_t calculatedDataChecksum = calcDataChecksum(disk, metadata);
+            uint32_t calculatedTagChecksum = calcTagChecksum(disk, metadata);
+
+            if (calculatedDataChecksum != metadata->header.dataChecksum) {
+                Serial.printf("WARNING: Data checksum mismatch! Expected %08x but calculated %08x\n", metadata->header.dataChecksum, calculatedDataChecksum);
+            }
+            else {
+                Serial.println("Data checksum is good.");
+            }
+
+            if (calculatedTagChecksum != metadata->header.tagChecksum) {
+                Serial.printf("WARNING: Tag checksum mismatch! Expected %08x but calculated %08x\n", metadata->header.tagChecksum, calculatedTagChecksum);
+            }
+            else {
+                Serial.println("Tag checksum is good.");
+            }
+
         }
         else { // The image doesn't have the correct magic number; not a DC42
             // Check if it's a DART image by looking at the first two bytes; if the first byte is 1, 2, or 3 and the second byte is 16, 17, or 18 (decimal), then it's a DART image
@@ -103,37 +189,67 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
     return true; // And return true on success
 }
 
+// Initial time: 39296
+// Time after reading track as big block: 10004
+
 // Reads an entire track (both sides if 800K disk) from the disk image into a DecodedSector array
-void readTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskImageMetadata* metadata) {
+__attribute__((optimize("Ofast"))) void readTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskImageMetadata* metadata) {
     uint32_t startTime = micros();
+
+    // First, figure out if it's a single-sided or double-sided disk
+    uint32_t sides = (metadata->driveType == Drive800) ? 2 : 1;
+
     // Use our LUT to find the number of sectors in the current track (8, 9, 10, 11, or 12)
     uint32_t sectorsInTrack = sectorsPerTrack[track];
     // Also count up the total number of sectors on the disk up to this track for offset calculations later
     uint32_t totalSectorsBeforeTrack = 0;
-    for (uint32_t i = 0; i < track; i++) {
-        totalSectorsBeforeTrack += sectorsPerTrack[i];
+    // Make sure to account for both sides if it's an 800K disk
+    for (uint32_t i = 0; i < sides; i++) {
+        for (uint32_t j = 0; j < track; j++) {
+            totalSectorsBeforeTrack += sectorsPerTrack[j];
+        }
     }
-    // Then figure out if it's a single-sided or double-sided disk
-    uint32_t sides = (metadata->driveType == Drive800) ? 2 : 1;
-    // Now we can loop through each side and each sector to read them all in
-    for (uint32_t side = 0; side < sides; side++) {
-        for (uint32_t sector = 0; sector < sectorsInTrack; sector++) {
-            // The disk image could be either raw or DC42, and we need to read it differently depending on which it is
+
+    // Now compute the offset to the start of the track's data and tags in the disk image
+    // For raw images, the data offset is just the total sectors before this track times 512
+    // And there's no tag data at all
+    uint32_t readOffset = 0;
+
+    if (metadata->imageType == RAW) {
+        readOffset = (totalSectorsBeforeTrack * 512);
+        disk->seekSet(readOffset); // Seek to the computed offset
+        // Now read all the sector data for this track into our raw data buffer at once
+        disk->read(rawDataBuffer, sectorsInTrack * 512 * sides);
+    }
+    // For DC42 images, we have to account for the header as well, and there might be a tag offset too
+    else if (metadata->imageType == DC42) {
+        readOffset = sizeof(DC42Header) + (totalSectorsBeforeTrack * 512);
+        disk->seekSet(readOffset); // Seek to the computed offset
+        // And read in all the data
+        disk->read(rawDataBuffer, sectorsInTrack * 512 * sides);
+        // Check if there are tags present
+        if (metadata->tagsPresent) {
+            // And if so, compute the offset to the start of the tags
+            readOffset = sizeof(DC42Header) + (DATA_SIZE_400K * sides) + (totalSectorsBeforeTrack * 12);
+            disk->seekSet(readOffset); // Seek to the tag offset
+            // And read in all the tags
+            disk->read(rawTagBuffer, sectorsInTrack * 12 * sides);
+        }
+    }
+
+    for (uint32_t sector = 0; sector < sectorsInTrack; sector++) {
+        for (uint32_t side = 0; side < sides; side++) {
+            // Handle raw and DC42 images differently
             if (metadata->imageType == RAW) {
-                // For raw images, we just need to compute the offset based on track, side, and sector
-                // I'm operating under the assumption that all the sectors of side 0 come first, then all the sectors of side 1
-                // Hopefully this is right; I can't find any documentation on this for raw images or DC42 images
-                // We take the side and multiply it by the size of a single-sided tagless image to get to the start of that side's data
-                // And then add the total number of sectors before this track times 512 (sector size) to get to the start of this track
-                // And finally, add the sector number times 512 to get to the start of this sector
-                uint32_t readOffset = (side * DATA_SIZE_400K) + (totalSectorsBeforeTrack * 512) + (sector * 512);
-                disk->seekSet(readOffset); // Seek to the computed offset
-                // Now we need to read the data into sectors[side][sector].data, except start reading it into position 12
                 // The first 12 bytes of each sector are the tag, which raw images don't have, so we just zero them out
                 for (int i = 0; i < 12; i++) {
                     sectors[side][sector].data[i] = 0; // Zero out the tag bytes
                 }
-                disk->read(&sectors[side][sector].data[12], 512); // Then read the 512 bytes of data into the rest of the sector
+                // Now copy the 512 bytes of data from our raw data buffer into the sector's data array starting at position 12
+                // The offset into the raw data buffer is computed based on the side, and current sector number from the for loop
+                uint32_t bufferOffset = (sector * sides * 512) + (side * 512);
+                // Use memcpy instead of a loop for speed
+                memcpy(&sectors[side][sector].data[12], &rawDataBuffer[bufferOffset], 512);
                 // Now set the other fields of our DecodedSector struct
                 sectors[side][sector].track = track;
                 sectors[side][sector].side = side;
@@ -145,19 +261,17 @@ void readTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskIm
                 sectors[side][sector].format |= 0x02; // Bits [4:0] are interleave factor
             }
             else if (metadata->imageType == DC42) {
-                // If it's a DC42, then we've got a little more to do, given that there's a header and possibly tags
-                // First, compute the offset to the start of the (data) sector we want to read, accounting for the header size
-                uint32_t readOffset = sizeof(DC42Header) + (side * DATA_SIZE_400K) + (totalSectorsBeforeTrack * 512) + (sector * 512);
-                // Then seek to that offset in the file and read it into the sector's data array, starting at position 12
-                disk->seekSet(readOffset); // Seek to the computed offset
-                disk->read(&sectors[side][sector].data[12], 512);
+                // If it's a DC42, then start by copying over the 512 data bytes just like for raw images
+                uint32_t bufferOffset = (sector * sides * 512) + (side * 512);
+                // Use memcpy instead of a loop for speed
+                memcpy(&sectors[side][sector].data[12], &rawDataBuffer[bufferOffset], 512);
                 // Now handle the tags if they're present
                 if (metadata->tagsPresent) {
                     // If they are, then we need to read the 12-byte tag for this sector
-                    // So compute the offset to the start of the tag; the tag data comes right after all the regular data in the DC42 file
-                    readOffset = sizeof(DC42Header) + (sides * DATA_SIZE_400K) + (totalSectorsBeforeTrack * 12) + (sector * 12);
-                    disk->seekSet(readOffset); // Seek to the computed offset
-                    disk->read(&sectors[side][sector].data[0], 12); // And read the 12-byte tag into the start of the sector's data array
+                    // So compute the offset into the raw tag buffer
+                    bufferOffset = (sector * sides * 12) + (side * 12);
+                    // And copy the 12 bytes from the raw tag buffer into the start of the sector's data array
+                    memcpy(&sectors[side][sector].data[0], &rawTagBuffer[bufferOffset], 12);
                 }
                 else {
                     // If there aren't any tags, just zero out the first 12 bytes of the sector's data array like for the raw image
@@ -179,29 +293,34 @@ void readTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskIm
 }
 
 // Writes an entire track (both sides if 800K disk) from a DecodedSector array back into the disk image
-void writeTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskImageMetadata* metadata) {
+__attribute__((optimize("Ofast"))) void writeTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskImageMetadata* metadata) {
     uint32_t startTime = micros();
     // This is going to be pretty darn similar to readTrack, but in reverse
-    // First, use our LUT to find the number of sectors in the current track
+    // First, figure out if it's a single-sided or double-sided disk
+    uint32_t sides = (metadata->driveType == Drive800) ? 2 : 1;
+
+    // Use our LUT to find the number of sectors in the current track (8, 9, 10, 11, or 12)
     uint32_t sectorsInTrack = sectorsPerTrack[track];
     // Also count up the total number of sectors on the disk up to this track for offset calculations later
     uint32_t totalSectorsBeforeTrack = 0;
-    for (uint32_t i = 0; i < track; i++) {
-        totalSectorsBeforeTrack += sectorsPerTrack[i];
+    // Make sure to account for both sides if it's an 800K disk
+    for (uint32_t i = 0; i < sides; i++) {
+        for (uint32_t j = 0; j < track; j++) {
+            totalSectorsBeforeTrack += sectorsPerTrack[j];
+        }
     }
-    // Then figure out if it's a single-sided or double-sided disk
-    uint32_t sides = (metadata->driveType == Drive800) ? 2 : 1;
-    // Now loop through the sides and sectors just like in readTrack
-    for (uint32_t side = 0; side < sides; side++) {
-        for (uint32_t sector = 0; sector < sectorsInTrack; sector++) {
+
+    // Before we write anything to disk, we need to grab all the sector data and put it in the rawDataBuffer
+    // And put the tags in the rawTagBuffer if applicable
+    for (uint32_t sector = 0; sector < sectorsInTrack; sector++) {
+        for (uint32_t side = 0; side < sides; side++) {
             // Again, handle raw and DC42 images differently
             if (metadata->imageType == RAW) {
                 // Compute the offset the same way as in readTrack
-                uint32_t writeOffset = (side * DATA_SIZE_400K) + (totalSectorsBeforeTrack * 512) + (sector * 512);
-                disk->seekSet(writeOffset);
-                // There's no tags to write for raw images, so just write the 512 bytes of data starting at position 12
-                // And then we're done
-                disk->write(&sectors[side][sector].data[12], 512);
+                uint32_t bufferOffset = (sector * sides * 512) + (side * 512);
+                // And copy the 512 bytes of data from the sector's data array starting at position 12 into our raw data buffer
+                memcpy(&rawDataBuffer[bufferOffset], &sectors[side][sector].data[12], 512);
+                // For raw images, we don't have any tags to write, so we can skip that part
             }
             // If it's not raw, it must be DC42
             else if (metadata->imageType == DC42) {
@@ -210,21 +329,44 @@ void writeTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskI
                 // Most likely, it'll be the same format byte we read when we opened the image, but there's a chance the host formatted the disk differently while in use
                 // This is a bit inefficient since we're doing it for every sector, but there are only 12-24 sectors max per track
                 metadata->header.diskFormat = sectors[side][sector].format;
-                // Compute the offset to the data sector the same way as in readTrack for DC42s
-                uint32_t writeOffset = sizeof(DC42Header) + (side * DATA_SIZE_400K) + (totalSectorsBeforeTrack * 512) + (sector * 512);
-                disk->seekSet(writeOffset);
-                // Write the 512 bytes of data starting at position 12
-                disk->write(&sectors[side][sector].data[12], 512);
+                // Now find the data offset just like before
+                uint32_t bufferOffset = (sector * sides * 512) + (side * 512);
+                // And copy over the 512 bytes of sector data
+                memcpy(&rawDataBuffer[bufferOffset], &sectors[side][sector].data[12], 512);
                 // Now handle the tags if the image supports them
                 if (metadata->tagsPresent) {
                     // If the DC42 image supports tags, compute the offset to the tag the same way as in readTrack
-                    writeOffset = sizeof(DC42Header) + (sides * DATA_SIZE_400K) + (totalSectorsBeforeTrack * 12) + (sector * 12);
-                    disk->seekSet(writeOffset);
-                    // Write the 12-byte tag from the start of the sector's data array to the disk image
+                    bufferOffset = (sector * sides * 12) + (side * 12);
+                    // And copy the 12-byte tag from the start of the sector's data array into our raw tag buffer
+                    memcpy(&rawTagBuffer[bufferOffset], &sectors[side][sector].data[0], 12);
                     // And we're done; no need to handle the "no tags" case since we don't have to write anything then
-                    disk->write(&sectors[side][sector].data[0], 12);
                 }
             }
+        }
+    }
+
+    // Now that we've got all the data and tags in our raw buffers, we can write them back to the disk image
+    // First, compute the offset to the start of the track's data in the disk image
+    uint32_t writeOffset = 0;
+    // This is going to be different for raw and DC42 images
+    if (metadata->imageType == RAW) {
+        writeOffset = (totalSectorsBeforeTrack * 512);
+        disk->seekSet(writeOffset); // Seek to the computed offset
+        // Now write all the sector data for this track from our raw data buffer at once
+        disk->write(rawDataBuffer, sectorsInTrack * 512 * sides);
+    }
+    else if (metadata->imageType == DC42) {
+        writeOffset = sizeof(DC42Header) + (totalSectorsBeforeTrack * 512);
+        disk->seekSet(writeOffset); // Seek to the computed offset
+        // And write all the data
+        disk->write(rawDataBuffer, sectorsInTrack * 512 * sides);
+        // Check if there are tags present
+        if (metadata->tagsPresent) {
+            // And if so, compute the offset to the start of the tags
+            writeOffset = sizeof(DC42Header) + (DATA_SIZE_400K * sides) + (totalSectorsBeforeTrack * 12);
+            disk->seekSet(writeOffset); // Seek to the tag offset
+            // And write all the tags
+            disk->write(rawTagBuffer, sectorsInTrack * 12 * sides);
         }
     }
     Serial.printf("Wrote track %d in %d microseconds.\n", track, micros() - startTime);
@@ -236,53 +378,21 @@ void closeImage(File32* disk, DiskImageMetadata* metadata) {
     // If it's a DC42 image, we need to update the header before closing
     if (metadata->imageType == DC42) {
         // All we need to do here is update the data and tag checksums in the DC42 header
-        // The checksum algorithm is pretty darn simple: start with a 32-bit accumulator at 0
-        // Then add each 16-bit BIG ENDIAN!!!! word of the data to the accumulator
-        // And then rotate the accumulator right by 1 bit
-        uint8_t buffer[1024]; // Buffer to hold the sector data as we read it
-        uint32_t dataChecksum = 0;
-        // Now loop over all the sector data in 1024-byte chunks
-        for (uint32_t offset = 0; offset < metadata->header.dataSize; offset += 1024) {
-            // Seek to the proper spot in the disk image
-            disk->seekSet(sizeof(DC42Header) + offset);
-            // And now figure out how many bytes we should actually read
-            // It might be less than 1024 if we're on the last iteration and the data size isn't a multiple of 1024
-            uint32_t bytesToRead = min((uint32_t)1024, metadata->header.dataSize - offset);
-            // Now go ahead and read that many bytes into our buffer
-            disk->read(buffer, bytesToRead);
-            // We've got the data, so now compute the checksum over it
-            for (uint32_t i = 0; i < bytesToRead; i += 2) {
-                uint32_t word = (buffer[i] << 8) | buffer[i + 1]; // Combine two bytes into a big-endian word
-                dataChecksum += word; // Add the word to the checksum
-                dataChecksum = (dataChecksum >> 1) | (dataChecksum << 31); // Rotate the checksum right by 1 bit
-            }
-        }
-        // The tag checksum is the same, just we iterate over the tag data instead of the regular data
-        // And apparently there was a bug in the original DC42 implementation where the first 12 tag bytes were skipped in the checksum
-        // For the sake of compatibility, that convention has been preserved ever since, and so we'll do it here too
-        uint32_t tagChecksum = 0;
-        // First, make sure the image actually has tags; if not, we just leave the tag checksum as 0
-        if (metadata->tagsPresent) {
-            // Note that we're starting the offset at 12 to skip the first 12 tag bytes
-            for (uint32_t offset = 12; offset < metadata->header.tagSize; offset += 1024) {
-                // Seek to the proper spot in the disk image
-                disk->seekSet(sizeof(DC42Header) + metadata->header.dataSize + offset);
-                // Figure out how many bytes to read just like before
-                uint32_t bytesToRead = min((uint32_t)1024, metadata->header.tagSize - offset);
-                // Read that many bytes into our buffer
-                disk->read(buffer, bytesToRead);
-                // And compute the checksum over the tag data
-                for (uint32_t i = 0; i < bytesToRead; i += 2) {
-                    uint32_t word = (buffer[i] << 8) | buffer[i + 1]; // Combine two bytes into a big-endian word
-                    tagChecksum += word; // Add the word to the checksum
-                    tagChecksum = (tagChecksum >> 1) | (tagChecksum << 31); // Rotate the checksum right by 1 bit
-                }
-            }
-        }
+        uint32_t dataChecksum = calcDataChecksum(disk, metadata);
+        uint32_t tagChecksum = calcTagChecksum(disk, metadata);
+        
         // Now that we've computed both checksums, update the DC42 header struct
         metadata->header.dataChecksum = dataChecksum;
         metadata->header.tagChecksum = tagChecksum;
-        // Now seek back to the start of the file and write the updated header back to the disk image
+
+        // Swap the byte order of the header back to big-endian for writing to the file
+        metadata->header.dataSize = __builtin_bswap32(metadata->header.dataSize);
+        metadata->header.tagSize = __builtin_bswap32(metadata->header.tagSize);
+        metadata->header.dataChecksum = __builtin_bswap32(metadata->header.dataChecksum);
+        metadata->header.tagChecksum = __builtin_bswap32(metadata->header.tagChecksum);
+        metadata->header.dc42Magic = __builtin_bswap16(metadata->header.dc42Magic);
+
+        // And seek back to the start of the file and write the updated header back to the disk image
         disk->seekSet(0);
         disk->write(&metadata->header, sizeof(DC42Header));
     }
