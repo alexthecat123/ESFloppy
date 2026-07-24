@@ -43,10 +43,10 @@ inline __attribute__((__always_inline__)) void RMTControl() {
 }
 
 // Gives GPIO control over the RDA pin
-inline __attribute__((__always_inline__)) void GPIOControl() {
+/*inline __attribute__((__always_inline__)) void GPIOControl() {
     // Route GPIO4 to normal GPIO function
     REG_WRITE(GPIO_FUNC4_OUT_SEL_CFG_REG, ((REG_READ(GPIO_FUNC4_OUT_SEL_CFG_REG) & 0xFFFFFE00) | 256));
-}
+}*/
 
 // This function converts a GcrSector into its corresponding RMTSector
 __attribute__((optimize("Ofast"))) void convertGCRToRMT(GcrSector* gcr, RMTSector* rmt);

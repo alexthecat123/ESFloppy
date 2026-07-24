@@ -242,7 +242,7 @@ void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][12], GcrSec
             encodeSector(&decodedSectors[0][i], &gcrSectors[0][i]);
         }
     }
-    Serial.printf("Track encoding to GCR took %u microseconds\n", micros() - startTime);
+    //Serial.printf("Track encoding to GCR took %u microseconds\n", micros() - startTime);
 }
 
 // This function decodes an entire GCR track (all sectors) into decoded format
@@ -265,5 +265,5 @@ void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSecto
             decodeSector(&gcrSectors[0][i], &decodedSectors[0][i]);
         }
     }
-    Serial.printf("Track decoding from GCR took %u microseconds\n", micros() - startTime);
+    //Serial.printf("Track decoding from GCR took %u microseconds\n", micros() - startTime);
 }

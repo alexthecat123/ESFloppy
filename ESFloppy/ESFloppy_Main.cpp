@@ -1,8 +1,11 @@
 #include <Arduino.h>
+#include <Adafruit_SH110X.h>
 #include "SdFat.h"
+#include <esp_cpu.h>
 #include "diskLib.h"
 #include "GCRLib.h"
 #include "GPIO.h"
+#include "LEDC.h"
 #include "RMT.h"
 #include "types.h"
 
@@ -27,12 +30,39 @@ uint32_t sectorsPerTrack[80] = {
     56...71 524
     72...79 590
 */
-uint32_t tachPulsesPerTrack[80] = {
+uint32_t tachPulsesPerTrackMac[80] = {
     394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, 394, // Tracks 0-15
     429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, // Tracks 16-31
     472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, // Tracks 32-47
     525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, // Tracks 48-63
     578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, // Tracks 64-79
+};
+
+// For the sake of speed, we can't be converting these TACH RPM values into LEDC divider values on the fly
+// So precompute the dividers and store them in another LUT
+uint32_t tachDividerPerTrackMac[80] = {
+    203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, 203045, // Tracks 0-15
+    186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, // Tracks 16-31
+    169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, // Tracks 32-47
+    152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, // Tracks 48-63
+    138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, // Tracks 64-79
+};
+
+// The Lisa uses a slightly different set of TACH pulse frequencies, so here's a separate set of LUTs for those
+uint32_t tachPulsesPerTrackLisa[80] = {
+    407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, // Tracks 0-15
+    429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, // Tracks 16-31
+    472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, // Tracks 32-47
+    525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, // Tracks 48-63
+    578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, // Tracks 64-79
+};
+
+uint32_t tachDividerPerTrackLisa[80] = {
+    196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, // Tracks 0-15
+    186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, // Tracks 16-31
+    169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, // Tracks 32-47
+    152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, // Tracks 48-63
+    138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, // Tracks 64-79
 };
 
 // Watchdog timer write enable register and value
@@ -46,6 +76,9 @@ uint32_t tachPulsesPerTrack[80] = {
 SPIClass SD_SPI(HSPI); // These two lines make sure that we use hardware SPI at 20MHz for the SD card
 #define SD_CONFIG SdSpiConfig(SD_CS, DEDICATED_SPI, SD_SCK_MHZ(20), &SD_SPI)
 
+// Create the OLED display object; we want a 128x64 display
+Adafruit_SH1106G OLED = Adafruit_SH1106G(128, 64, &Wire, -1);
+
 SdFat32 SDCard; // The SD card object
 File32 disk; // The disk image that ESFloppy is using
 FatFile rootDir; // The root directory of the SD card
@@ -54,105 +87,144 @@ static DecodedSector trackBufferDecoded[2][12]; // Buffer for decoded sectors fo
 static GcrSector trackBufferGCR[2][12]; // Buffer for GCR-encoded sectors for each side of the disk
 
 
-uint32_t currentSector = 2; // Start with sector 2 since we preloaded sectors 0 and 1
+uint32_t currentSector = 0;
 uint32_t inSectorIndex = 0;
-uint32_t rmtBufferIndex = 0;
-uint8_t currentTrack = 0;
-bool loadZero = false;
-bool loadOne = false;
-
-//static RMTSector trackBufferRMT[2][2]; // Double-sided double buffer for RMT sectors // [2][2]
+uint32_t currentTrack = 0;
+uint32_t bitTime = 0;
+uint32_t prevBitTime = 0;
 
 DiskImageMetadata diskMetadata;
 
-// This function preloads sectors 0 and 1 of both sides into the RMT buffers
-// We call it whenever we open a new disk image or step to a new track to ensure that the RMT has data to send right away
-void preloadSectors() {
-    // First, encode those two sectors on each side into GCR format and stick them in the RMT buffer
-    //convertGCRToRMT(&trackBufferGCR[0][0], &trackBufferRMT[0][0]); // Preload the first sector on side 0
-    //convertGCRToRMT(&trackBufferGCR[0][1], &trackBufferRMT[0][1]); // And the second
-    //convertGCRToRMT(&trackBufferGCR[1][0], &trackBufferRMT[1][0]); // Preload the first sector on side 1
-    //convertGCRToRMT(&trackBufferGCR[1][1], &trackBufferRMT[1][1]); // And the second
-    // Now clear out the state of the RMT so it starts sending from the beginning of sector 0 on side 0
-    currentSector = 2; // Reset the current sector to 2 since we preloaded sectors 0 and 1
-    inSectorIndex = 0; // And the in-sector index to 0
-    rmtBufferIndex = 0; // Also reset the RMT buffer index to 0
-}
+bool prevLSTRB = 0;
+bool currLSTRB = 0;
 
-// This function will get called on loop whenever the Lisa is accessing the floppy's read data register
-// It checks if the RMT needs more data, and if so, fills it from our double buffer of RMTSectors
-// It also handles loading the next sector into the other buffer as needed
-void transmitTrack(bool side) {
-    // Check if the RMT needs more data
-    if (rmtNeedsData()) {
-        // If so, we need to clear the interrupt flag that was set to tell us it was empty
-        clearRMTInt();
-        // Now copy the next 96 RMTDataItems from the current sector buffer to the RMT memory FIFO
-        for(uint32_t i = 0; i < 96; i++) {
-            // If the inSectorIndex has reached the end of the sector, we need to move to the next one
-            if (inSectorIndex >= 5864) {
-                // So move to buffer location 1 if we're in 0
-                if (rmtBufferIndex == 0) {
-                    // And set a flag to indicate we need to load the next sector into buffer 0
-                    loadZero = true;
-                    loadOne = false;
-                    rmtBufferIndex = 1;
-                }
-                // And to buffer location 0 if we're in 1
-                else {
-                    // And set a flag to indicate we need to load the next sector into buffer 1
-                    loadOne = true;
-                    loadZero = false;
-                    rmtBufferIndex = 0;
-                }
-                // Then increment the current sector, wrapping back to 0 if we reach the end of the track
-                currentSector++;
-                if (currentSector >= sectorsPerTrack[currentTrack]) {
-                    currentSector = 0;
-                }
-                // And reset the in-sector index since we just started a new one
-                inSectorIndex = 0;
+bool ledcAttached = false;
+StepDirection stepDirection = OUT;
+bool stepComplete = true;
+bool motorOn = false;
+
+bool ejectPending = false;
+uint16_t ejectStartTime;
+uint32_t tachFreq = 0;
+
+bool dirty = false;
+
+// This function will get called whenever the Lisa is accessing the floppy's read data register
+// It checks if it's time to send out a new flux transition, and if so, it bit-bangs it out on the RDA pin
+// For the sake of speed, we don't return from here until the Lisa stops reading from the read data register
+// We need speed here, so make sure to stick it in IRAM and optimize it as much as possible
+__attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
+    // Each bit time is 2us long; for a 1 bit, we send a falling edge at the start, followed by a rising edge 1us later
+    // For a 0 bit, we just keep it high the whole time
+    while (1) {
+        // Before we do anything, we need to check to see if the Lisa is still reading from the read data register to begin with
+        // For the sake of speed, do a raw REG_READ here instead of using any helper functions
+        uint32_t gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register
+        // Now check for the proper pattern; the read registers are registers 8 and 9
+        // We don't care about the low side select bit; we just need to make sure the high 3 bits {PH2, PH1, PH0} are 100
+        // And we also need to be sure that LSTRB (PH3) isn't high; if it is, then we might miss a write to regs 0 or 1 which look like regs 8 and 9 in write mode
+        if (!(gpioIn & 1 << PH2 && !(gpioIn & 1 << PH1) && !(gpioIn & 1 << PH0)) || (gpioIn & 1 << PH3)) {
+            // If not, then return
+            return;
+        }
+        // Otherwise, grab the side number from the low HDS bit and continue
+        uint32_t side = (gpioIn & 1 << HDS) ? 1 : 0;
+
+        // When we arrive here, we'll be on the first half of a bit, so just wait until it's time to send out that first half
+        while (esp_cpu_get_cycle_count() - prevBitTime <= 240); // Get the number of CPU cycles between now and the last bit time; esp_cpu_get_cycle_count() is faster than ESP.getCycleCount()
+        // Once that while loop finishes (240 cycles at 240MHz is 1us), it's time to send out the first half of our bit
+        prevBitTime = esp_cpu_get_cycle_count(); // First, reset the previous bit timer to the current time
+        // Now we need to extract the next bit from trackBufferGCR[side][currentSector]
+        GcrSector* gcrSector = &trackBufferGCR[side][currentSector]; // Get a pointer to the current GCR sector
+        uint32_t* gcrPtr = (uint32_t*)gcrSector; // And then get a uint32_t pointer to the sector data
+        uint32_t gcrWord = gcrPtr[inSectorIndex / 32]; // Then get the current word from the sector data
+        // Now we need to isolate the bit that we want from the word, keeping in mind that the ESP32 is little-endian
+        uint32_t bitMask = 1 << (31 - (inSectorIndex % 32)); // Create a mask for the bit we want
+        bool bit = (gcrWord & bitMask) != 0; // And finally extract the bit; that was a lot of work!
+        // Now we can send out the bit on RDA
+        if (bit) {
+            writeRDA(false); // Send a falling edge on RDA to indicate a 1 bit
+        } else {
+            writeRDA(true); // Or keep RDA high to indicate a 0 bit
+        }
+        
+        // Now we need to wait for the second half of the bit time, which is another 1us
+        while (esp_cpu_get_cycle_count() - prevBitTime <= 240);
+        prevBitTime = esp_cpu_get_cycle_count();
+        // Time to send the second half of the bit; if it was a 1, we need to send a rising edge; if it was a 0, we just keep it high
+        // We don't need to retrieve the bit again and check its value because regardless of whether it was a 0 or a 1, we need to set it high!
+        writeRDA(true); // Nice and easy!
+        
+        // We now need to increment to the next bit in the sector
+        inSectorIndex++;
+        if (inSectorIndex >= 5864) {
+            // If we're about to go past the end of the sector, we need to move to the next one
+            currentSector++;
+            if (currentSector >= sectorsPerTrack[currentTrack]) {
+                currentSector = 0; // Or wrap back to sector 0 if we're at the end of the track
             }
-            // Actually copy the data now, making sure to select the correct side's buffer
-            //REG_WRITE(RMT_CH0_FIFO, *((uint32_t*)&trackBufferRMT[side][rmtBufferIndex].data[inSectorIndex++]));
-        }
-        // Now that we've copied the data, we can check if we need to load the next sector into the other buffer
-        // It's the same for buffers zero or one, just with different trackBufferRMT indices
-        // And don't forget to load both sides, not just one
-        // If it's not actually a double-sided disk, then who cares, we'll get garbage RMT data for side 1 which will simulate reading the wrong side of a 400K disk pretty well
-        if (loadZero) {
-            loadZero = false;
-            //convertGCRToRMT(&trackBufferGCR[0][currentSector], &trackBufferRMT[0][0]);
-            //convertGCRToRMT(&trackBufferGCR[1][currentSector], &trackBufferRMT[1][0]);
-        }
-        else if (loadOne) {
-            loadOne = false;
-            //convertGCRToRMT(&trackBufferGCR[0][currentSector], &trackBufferRMT[0][1]);
-            //convertGCRToRMT(&trackBufferGCR[1][currentSector], &trackBufferRMT[1][1]);
+            inSectorIndex = 0; // Don't forget to reset the in-sector index since we're starting a new sector
         }
     }
 }
+
+void updateOLED () {
+    OLED.clearDisplay();
+    //OLED.setTextSize(1);
+    //OLED.setTextColor(SH110X_WHITE);
+    OLED.setCursor(0, 0);
+    OLED.print("Track: "); OLED.println(currentTrack);
+    //OLED.print("Motor: "); OLED.println(motorOn ? "ON" : "OFF");
+    //OLED.print("Image Type: "); OLED.println(diskMetadata.imageType == DC42 ? "DC42" : "RAW");
+    //OLED.print("Drive Type: "); OLED.println(diskMetadata.driveType == Drive400 ? "400K" : "800K");
+    //OLED.print("Disk in Place: "); OLED.println(diskMetadata.diskInserted ? "YES" : "NO");
+    //OLED.print("Eject Pending: "); OLED.println(ejectPending ? "YES" : "NO");
+    OLED.display();
+}
+
 
 void setup() {
     init(); // Init the ESP32 Arduino core
     // Just like ESProFile, we need to disable the interrupt watchdog timer
     // For the sake of speed, we have to disable interrupts throughout our entire program, and the watchdog would trigger and break everything
-    REG_WRITE(TIMG1_WDT_WE_REG, TIMG1_WDT_WE); // Enable writing to the watchdog timer registers
-    REG_CLR_BIT(TIMG1_WDT_CONF_REG, TIMG1_WDT_EN); // And clear the timer's enable bit to disable it
+    //REG_WRITE(TIMG1_WDT_WE_REG, TIMG1_WDT_WE); // Enable writing to the watchdog timer registers
+    //REG_CLR_BIT(TIMG1_WDT_CONF_REG, TIMG1_WDT_EN); // And clear the timer's enable bit to disable it
     //noInterrupts(); // Now that it's safe to do so, disable interrupts for the rest of the program
     Serial.begin(115200); // Start serial comms for debugging
     Serial.println("Starting ESFloppy...");
     initRMT(); // Initialize the RMT peripheral for floppy data transmission
-    GPIOControl(); // Give the GPIO (not RMT) control over the RDA pin initially
+    initLEDC(RDA); // Initialize the LEDC peripheral on the RDA pin for sending TACH pulses
+    setDuty(128); // Set the LEDC duty cycle to 50%
+    enableLEDCOutput(true); // And enable its output (note that this doesn't actually connect it to the pin though)
+    //GPIOControl(); // Give the GPIO (not RMT) control over the RDA pin initially
+    initPins(); // Set all of ESFloppy's pins to the correct direction and state
     SD_SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); // Start comms with the SD card using our hardware SPI instance
-    //initPins(); // Set all of ESFloppy's pins to the correct direction and state
+    // Now initialize the OLED
+    Wire.begin(OLED_SDA, OLED_SCL); // Start the I2C bus for the OLED
+    OLED.begin(0x3C, true); // And init it
+    // Clear the display since there might be garbage on it after reset
+    OLED.clearDisplay();
+    OLED.display();
+    // And now move onto the SD card
     if (!SDCard.begin(SD_CONFIG)) { // Initialize the SD card with our hardware SPI instance
         Serial.println("SD card initialization failed! Halting..."); // And print an error/go into an infinite loop on failure
+        OLED.clearDisplay();
+        OLED.setTextSize(2);
+        OLED.setTextColor(SH110X_WHITE);
+        OLED.setCursor(0, 0);
+        OLED.print("SD Init Failed!");
+        OLED.display();
         while(1);
     }
     rootDir.open("/"); // Then open the card's root directory
-    if (!openImage("800k_mw2install.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
+    if (!openImage("test_image.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
         Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
+        OLED.clearDisplay();
+        OLED.setTextSize(2);
+        OLED.setTextColor(SH110X_WHITE);
+        OLED.setCursor(0, 0);
+        OLED.print("Can't Open Disk!");
+        OLED.display();
         while(1); // If we fail to open the image, just hang here
     }
     // Now do a test read and write of track 0
@@ -175,7 +247,7 @@ void setup() {
         }
     }*/
     encodeTrackToGCR(0, trackBufferDecoded, trackBufferGCR, &diskMetadata);
-    preloadSectors(); // Preload sectors 0 and 1 of both sides into the RMT buffers
+    //preloadSectors(); // Preload sectors 0 and 1 of both sides into the RMT buffers
     // For testing purposes, let's modify sector 0's data a bit
     // Invert all 524 bytes of all the sectors on both sides of track 0
     /*for (int side = 0; side < 2; side++) {
@@ -186,23 +258,15 @@ void setup() {
         }
     }*/
     //writeTrack(0, &disk, trackBufferDecoded, &diskMetadata); // Write the modified track back to the disk image
-    closeImage(&disk, &diskMetadata); // Close the image
+    //closeImage(&disk, &diskMetadata); // Close the image
+    OLED.setTextSize(1);
+    OLED.setTextColor(SH110X_WHITE);
+    for(int i = 0; i < 80; i++) {
+        setFreq(tachPulsesPerTrackLisa[i], 8);
+    }
+    //updateOLED(); // Update the OLED with the current status
     Serial.println("ESFloppy is ready!"); // If all this succeeds, print a ready message
 }
-
-
-bool prevLSTRB = 0;
-bool currLSTRB = 0;
-
-StepDirection stepDirection = OUT;
-bool stepComplete = true;
-bool motorOn = false;
-
-bool ejectPending = false;
-uint16_t ejectStartTime;
-uint32_t tachFreq = 0;
-
-bool dirty = false;
 
 void loop() {
     // Don't do anything unless the drive is enabled (DR1 low)
@@ -215,18 +279,25 @@ void loop() {
         // Reading EJECT always returns 0, to eject a disk you have to write a 1 to EJECT but LSTRB has to be high for at least 500ms
         // MOTORON shouldn't do anything unless a disk is inserted
         // The host sets STEP to 0 to step the heads, but the drive must set it back to 1 again within 12ms. I'm guessing the host polls for this, and since we're planning on writing to the SD card during steps, we need to make sure to only set it back to 1 after the SD card write is finished
-    if (readDR1() == 0) { // If the drive is enabled, then we need to check for commands
-        currLSTRB = readPH3(); // Read the current state of LSTRB (PH3)
+        
+        // First up, read in the states of all the I/O pins that we care about
+        uint32_t gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register    
+    
+        if ((gpioIn & (1 << DR1)) == 0) { // If the drive is enabled, then we need to check for commands
+        currLSTRB = (gpioIn & (1 << PH3)) ? 1 : 0; // Read the current state of LSTRB (PH3)
         if (currLSTRB == 0) { // If LSTRB is low, then we need to put the selected register on the bus
             // Figure out which register the host wants to read from
-            uint8_t regNum = (readPH2() << 3) | (readPH1() << 2) | (readPH0() << 1) | (readHDS() << 0);
+            uint8_t regNum = ((gpioIn & (1 << PH2)) ? 8 : 0) | ((gpioIn & (1 << PH1)) ? 4 : 0) | ((gpioIn & (1 << PH0)) ? 2 : 0) | ((gpioIn & (1 << HDS)) ? 1 : 0);
             // Now we need to figure out what data to send for that register
-            if (regNum != 7) { // If we're not reading the TACH register, make sure to stop any ongoing tach pulse generation
-                ledcDetach(RDA);
+            if (regNum != 7 && ledcAttached) { // If we're not reading the TACH register, make sure to stop any ongoing tach pulse generation
+                // Only do this if it's not already detached since repeatedly detaching it wastes tons of time
+                ledcAttached = false;
+                GPIOControl(RDA); // Give the GPIO registers control of the RDA pin back so we can bit-bang data to it
+                //ledcDetach(RDA);
             }
-            if (regNum != 8 && regNum != 9) { // If we're not reading RDDATA for either head, make sure to give control of RDA back to GPIO (not the RMT)
+            /*if (regNum != 8 && regNum != 9) { // If we're not reading RDDATA for either head, make sure to give control of RDA back to GPIO (not the RMT)
                 GPIOControl();
-            }
+            }*/
             switch (regNum) {
                 case 0: // /DIRTN register (head step direction)
                     writeRDA(stepDirection);
@@ -250,13 +321,13 @@ void loop() {
                     writeRDA(0);
                     break;
                 case 7: // /TACH register (produces 60 pulses per revolution when motor is on)
-                    // Use our LUT to figure out how many tach pulses per second we need to generate for the current track
-                    tachFreq = tachPulsesPerTrack[currentTrack];
-                    // We'll use the LEDC peripheral to generate these pulses
-                    // But only output TACH pulses if the motor is on (DUH)
-                    if (motorOn == true) {
-                        ledcAttach(RDA, tachFreq, 1); // Attach to RDA pin, with the proper frequency and 1-bit resolution
-                        ledcWrite(RDA, 1); // And set the duty cycle to 50% for a square wave
+                    // Use our LUT to figure out what the LEDC divider value should be for the current track's TACH frequency
+                    tachFreq = tachDividerPerTrackLisa[currentTrack];
+                    // Only output TACH pulses if the motor is on (DUH), and only start the LEDC if it's not already running
+                    if (motorOn && !ledcAttached) {
+                        setFreqRaw(tachFreq, 8); // Set the LEDC divider value to our TACH frequency with 8-bit duty resolution
+                        LEDCControl(RDA); // And give the LEDC control of the RDA pin so it can output the TACH pulses
+                        ledcAttached = true; // Mark that the LEDC is attached so we don't attach/detach it unnecessarily
                     }
                     // If the motor is off, just output a constant low
                     else {
@@ -264,16 +335,24 @@ void loop() {
                     }
                     break;
                 case 8: // RDDATA register for head 0
-                    RMTControl(); // First hand over control of RDA to the RMT so it can send data to the Lisa
+                    //RMTControl(); // First hand over control of RDA to the RMT so it can send data to the Lisa
                     // Assuming the motor is running, the drive should already be sending data
                     // The calls to transmitTrack just ensure that the RMT's buffer always stays full
                     // The 0 means side 0
-                    transmitTrack(0);
+
+                    // If the drive's motor is running, then transmit data for side 0; otherwise, do nothing
+                    if (motorOn) {
+                        transmitTrack();
+                    }
                     break;
                 case 9: // RDDATA register for head 1; only valid for 800k drives
                     // Do the same thing we did for RDDATA for side 0, except now it's side 1
-                    RMTControl();
-                    transmitTrack(1);
+                    //RMTControl();
+
+                    // If the drive's motor is running, then transmit data for side 1; otherwise, do nothing
+                    if (motorOn) {
+                        transmitTrack();
+                    }
                     break;
                 case 12:
                 case 13: // SIDES register (duplicated on both addresses 12 and 13); returns 0 for 400K drives, 1 for 800K drives
@@ -291,8 +370,8 @@ void loop() {
         // Otherwise, if LSTRB (PH3) is on a rising edge, or LSTRB is just high period while an eject is pending, then we need to write to a register
         else if ((prevLSTRB == 0 && currLSTRB == 1) || (currLSTRB == 1 && ejectPending == true)) {
             // So figure out which register the host wants to write to
-            uint8_t regNum = (readPH1() << 2) | (readPH0() << 1) | (readHDS() << 0);
-            bool regData = readPH2(); // The data to write is on CA2 (PH2)
+            uint8_t regNum = ((gpioIn & (1 << PH1)) ? 4 : 0) | ((gpioIn & (1 << PH0)) ? 2 : 0) | ((gpioIn & (1 << HDS)) ? 1 : 0);
+            bool regData = (gpioIn & (1 << PH2)) ? 1 : 0; // The data to write is on CA2 (PH2)
             // Now write the data to the selected register
             switch (regNum) {
                 case 0: // /DIRTN register (head step direction, low for IN, high for OUT)
@@ -301,6 +380,7 @@ void loop() {
                 case 2: // /STEP register (host sets low to step heads, drive sets high when step is complete)
                     if (regData == 0 && stepComplete == true) { // If the host is trying to step the heads and we're not already in the middle of a step
                         stepComplete = false; // Mark that a step is in progress
+                        writeRDA(stepComplete); // And set the STEP register low to indicate that we're busy stepping
                         // Before we step, check the dirty bit to see if the current track was modified
                         if (dirty == true) {
                             // If so, write the current track back to the disk image before we seek away
@@ -309,33 +389,43 @@ void loop() {
                             dirty = false; // And clear the dirty bit
                         }
                         // Now we can actually perform the step
-                        if (stepDirection == IN) { // If stepping IN, decrement the track
-                            if (currentTrack > 0) {
-                                currentTrack--;
-                            }
-                        }
-                        else { // If stepping OUT, increment the track
+                        if (stepDirection == IN) { // If stepping IN, increment the track
                             if (currentTrack < 79) {
                                 currentTrack++;
+                            }
+                        }
+                        else { // If stepping OUT, decrement the track
+                            if (currentTrack > 0) {
+                                currentTrack--;
                             }
                         }
                         // Now that we've updated the track number, we need to read in all the sectors for this new track from the disk image
                         readTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata);
                         encodeTrackToGCR(currentTrack, trackBufferDecoded, trackBufferGCR, &diskMetadata);
-                        // And preload a couple sectors into our RMT buffer to get ready for reading
-                        preloadSectors();
+                        //// And preload a couple sectors into our RMT buffer to get ready for reading
+                        //preloadSectors();
+                        //updateOLED(); // Update the OLED with the current status
+                        Serial.println(currentTrack);
                         stepComplete = true; // Once they're read in, mark that the step is complete
                     }
                     break;
                 case 4: // /MOTORON register (low to turn motor on, high to turn motor off)
                     motorOn = (regData == 0);
-                    // We also only want the "read head" to send out a bitstream when the motor is on
-                    // So we implement that by starting and stopping the RMT
+                    //updateOLED(); // Update the OLED with the current status
+                    /*// We also only want the "read head" to send out a bitstream when the motor is on
+                    // So we implement that with the transmit
                     if (motorOn) {
                         startRMT(); // Start the RMT if the motor is turned on
                     }
                     else {
                         stopRMT(); // And stop it if the motor is turned off
+                    }*/
+                    // Turn on the activity LED whenever the motor is on too
+                    if (motorOn) {
+                        REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED);
+                    }
+                    else {
+                        REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
                     }
                     break;
                 case 6: // EJECT register (write-only, write a 1 to eject the disk)
@@ -345,9 +435,11 @@ void loop() {
                     if (regData == 1 && ejectPending == false) {
                         ejectPending = true; // If so, mark that an eject is pending
                         ejectStartTime = millis(); // And record the start time
+                        //updateOLED(); // Update the OLED with the current status
                     }
                     else if (regData == 0) { // If the host writes a 0, we need to cancel any pending eject
                         ejectPending = false;
+                        //updateOLED(); // Update the OLED with the current status
                     }
                     else if (ejectPending == true) { // Otherwise, if an eject is pending, check if 500ms has passed
                         if (millis() - ejectStartTime >= 500) {
@@ -355,7 +447,8 @@ void loop() {
                             diskMetadata.diskInserted = false;
                             motorOn = false; // Turn off the motor too
                             ejectPending = false;
-                            Serial.println("Disk ejected.");
+                            //updateOLED(); // Update the OLED with the current status
+                            //Serial.println("Disk ejected.");
                         }
                     }
                     break;
@@ -400,6 +493,7 @@ void loop() {
 // Writing doesn't care what register is being accessed; as long as the drive is enabled and WRQ is low, we write whatever's on WRD
 // So in our main loop, inside, the "if drive enabled" block, we just need to check if WRQ is low
 // If it is, call a function that reads data from a receiving RMT channel hooked to WRD
+// Make sure to clear the receive buffer on the falling edge of WRQ though so that we start fresh for each write operation
 // So of course we'll need to set up an RMT channel for receiving data on WRD somewhere during initialization
 // In this function, we'll do nothing unless the RMT's receive buffer is full, in which case we read all the RMTDataItems from it
 // Then we need to scan through that data to find the GCR sync marks that indicate the start of a sector

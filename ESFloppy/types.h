@@ -13,10 +13,10 @@
 #define PH2 10
 #define PH1 11
 #define PH0 12
-#define SD_SCK 5 //13
-#define SD_MOSI 2 //14
-#define SD_MISO 34 //15
-#define SD_CS 33 //16
+#define SD_SCK 41 // MTDI 41
+#define SD_MOSI 40 // MTDO 40
+#define SD_MISO 13 // 13
+#define SD_CS 16 // 32K_N 16
 #define MT1 17
 #define MT0 18
 #define DR1 21
