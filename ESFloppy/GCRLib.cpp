@@ -52,16 +52,61 @@ const uint8_t gcr_8to6[256] = {
     0xFF, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
 };
 
+// We also need two interleave lookup tables, one for 2:1 interleave and one for 4:1 interleave
+// The DC42 format technically supports other interleave factors too, but I've never seen them used
+// So anything that's not 1:1, 2:1, or 4:1 will just be treated as 2:1
+// These interleave tables have to be valid for all 5 track sizes (12, 11, 10, 9, and 8 sectors per track)
+// Each table is indexed like table[sectorsPerTrack][slot] where sectorsPerTrack is the number of sectors on the current track and slot is the physical slot number (0-11) that we're trying to find the logical sector for
+const uint8_t interleave2to1[13][12] = {
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 0 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 1 sector/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 2 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 3 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 4 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 5 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 6 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 7 sectors/track (unused)
+    {   0,    4,    1,    5,    2,    6,    3,    7, 0xFF, 0xFF, 0xFF, 0xFF}, // 8 sectors/track (tracks 64-79)
+    {   0,    5,    1,    6,    2,    7,    3,    8,    4, 0xFF, 0xFF, 0xFF}, // 9 sectors/track (tracks 48-63)
+    {   0,    5,    1,    6,    2,    7,    3,    8,    4,    9, 0xFF, 0xFF}, // 10 sectors/track (tracks 32-47)
+    {   0,    6,    1,    7,    2,    8,    3,    9,    4,   10,    5, 0xFF}, // 11 sectors/track (tracks 16-31)
+    {   0,    6,    1,    7,    2,    8,    3,    9,    4,   10,    5,   11}, // 12 sectors/track (tracks 0-15)
+};
+
+// Same idea for 4:1 interleave
+// Note that 4 and 8 share a common factor, so a true 4:1 layout is impossible on an 8-sector track;
+// that row ends up alternating 4 and 5 slots between consecutive logical sectors, which is as close as it gets
+const uint8_t interleave4to1[13][12] = {
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 0 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 1 sector/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 2 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 3 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 4 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 5 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 6 sectors/track (unused)
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 7 sectors/track (unused)
+    {   0,    2,    4,    6,    1,    3,    5,    7, 0xFF, 0xFF, 0xFF, 0xFF}, // 8 sectors/track (tracks 64-79)
+    {   0,    7,    5,    3,    1,    8,    6,    4,    2, 0xFF, 0xFF, 0xFF}, // 9 sectors/track (tracks 48-63)
+    {   0,    5,    3,    8,    1,    6,    4,    9,    2,    7, 0xFF, 0xFF}, // 10 sectors/track (tracks 32-47)
+    {   0,    3,    6,    9,    1,    4,    7,   10,    2,    5,    8, 0xFF}, // 11 sectors/track (tracks 16-31)
+    {   0,    3,    6,    9,    1,    4,    7,   10,    2,    5,    8,   11}, // 12 sectors/track (tracks 0-15)
+};
+
 // This function takes a decoded sector and encodes it into GCR format
 void encodeSector(DecodedSector* decoded, GcrSector* gcr) {
-    // First let's fill in the header fields
-    gcr->loTrack = decoded->track & 0x3F; // Low 6 bits of track
-    gcr->sector = decoded->sector; // Sector number gets pulled straight over
-    gcr->hiTrackSide = ((decoded->track & 0x40) >> 6) | ((decoded->side & 0x01) << 5); // High track bit in bit 0, side in bit 5
-    gcr->format = decoded->format; // Format byte gets pulled straight over too
-    gcr->headerChecksum = gcr->loTrack ^ gcr->sector ^ gcr->hiTrackSide ^ gcr->format; // Simple XOR checksum of the header fields
+    // First let's fill in the header fields, making sure to GCR-encode each one along the way
+    uint8_t loTrack = decoded->track & 0x3F; // Low 6 bits of track
+    uint8_t sectorNum = decoded->sector; // Sector number gets pulled straight over
+    uint8_t hiTrackSide = ((decoded->track & 0x40) >> 6) | ((decoded->side & 0x01) << 5); // High track bit in bit 0, side in bit 5
+    uint8_t format = decoded->format & 0x3F; // Format byte gets pulled straight over too; just isolate the low 6 bits to fit with GCR
+    gcr->loTrack = gcr_6to8[loTrack]; // Low 6 bits of track
+    gcr->sector = gcr_6to8[sectorNum]; // Sector number gets pulled straight over
+    gcr->hiTrackSide = gcr_6to8[hiTrackSide]; // High track bit in bit 0, side in bit 5
+    gcr->format = gcr_6to8[format]; // Format byte gets pulled straight over too
+    // Simple XOR checksum of the header fields; compute the checksum of the raw (non-GCR) values and then encode it as GCR
+    gcr->headerChecksum = gcr_6to8[loTrack ^ sectorNum ^ hiTrackSide ^ format];
     // Now onto the data stuff; starting with the sector number again
-    gcr->sector_again = decoded->sector;
+    gcr->sector_again = gcr_6to8[sectorNum];
     // Time for the hard part: encoding the 524 bytes of decoded data into 699 bytes of GCR data
     // It sounds easy enough, just with some annoying bit manipulations, but no, Apple makes it hard on us
     // We have to do this dumb algorithm that calculates a checksum along the way and modifies the data according to it
@@ -122,8 +167,7 @@ void encodeSector(DecodedSector* decoded, GcrSector* gcr) {
     carry = csumB & 0x100 ? 1 : 0; // Get the carry bit of csumB
     csumB = csumB & 0xFF; // Mask csumB to 8 bits
     byteB = byteB ^ csumA; // XOR byteB with csumA
-    csumC = csumC + byteC + carry; // Add byteC and carry to csumC
-    byteC = byteC ^ csumB; // XOR byteC with csumB
+    // No byteC or csumC since there isn't a third byte on this last chunk, so we can skip that part
     // Formulate the nibbles just as before, but skip anything C-related
     nibl1 = ((byteA & 0xC0) >> 2) | ((byteB & 0xC0) >> 4);
     // The next three nibbles are just the low 6 bits of each byte
@@ -149,14 +193,14 @@ void encodeSector(DecodedSector* decoded, GcrSector* gcr) {
 
 void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
     // Decoding is (obviously) just the reverse of encoding; first do the header
-    // Reconstruct the track number from the low and high bits
-    decoded->track = gcr->loTrack | ((gcr->hiTrackSide & 0x01) << 6);
+    // Reconstruct the track number from the low and high bits, decoding the GCR along the way
+    decoded->track = gcr_8to6[gcr->loTrack] | ((gcr_8to6[gcr->hiTrackSide] & 0x01) << 6);
     // The sector comes straight over
-    decoded->sector = gcr->sector;
+    decoded->sector = gcr_8to6[gcr->sector];
     // The side is in bit 5 of hiTrackSide
-    decoded->side = (gcr->hiTrackSide & 0x20) >> 5;
+    decoded->side = (gcr_8to6[gcr->hiTrackSide] & 0x20) >> 5;
     // And the format byte comes straight over too
-    decoded->format = gcr->format;
+    decoded->format = gcr_8to6[gcr->format];
     // Now we've got to do the stupid data decoding algorithm
     uint16_t csumA = 0, csumB = 0;
     uint8_t csumC = 0;
@@ -202,8 +246,8 @@ void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
     // Reconstruct bytes A and B
     byteA = ((nibl1 & 0x30) << 2) | (nibl2 & 0x3F);
     byteB = ((nibl1 & 0x0C) << 4) | (nibl3 & 0x3F);
-    byteC = 0; // Set C to 0 since we don't have a third byte
     // Undo the modifications made during encoding
+    // No byteC or csumC since there isn't a third byte on this last chunk, so we can skip that part
     csumC = (csumC << 1) | (csumC >> 7); // Rotate csumC left by 1
     carry = csumC & 0x01; // Get the low (carry) bit of csumC
     byteA = byteA ^ csumC; // XOR byteA with csumC
@@ -212,9 +256,7 @@ void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
     csumA = csumA & 0xFF; // And mask csumA to 8 bits to remove the carry
     byteB = byteB ^ csumA; // XOR byteB with csumA
     csumB = csumB + byteB + carry; // Add byteB and carry to csumB
-    carry = csumB & 0x100 ? 1 : 0; // Get the carry bit of csumB
     csumB = csumB & 0xFF; // And mask csumB to 8 bits to remove the carry
-    byteC = byteC ^ csumB; // XOR byteC with csumB
     // Now write the decoded bytes to the output data array
     decoded->data[j++] = byteA;
     decoded->data[j++] = byteB;
@@ -232,14 +274,30 @@ void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][12], GcrSec
     if (metadata->driveType == Drive800) {
         for(int i = 0; i < 2; i++) {
             for (int j = 0; j < sectorCount; j++) {
-                encodeSector(&decodedSectors[i][j], &gcrSectors[i][j]);
+                // Check which interleave table to use based on the interleave factor in the metadata
+                if (metadata->header.diskFormat & 0x1F == 0x04) {
+                    // We have a case for 4:1 interleave
+                    encodeSector(&decodedSectors[i][interleave4to1[sectorCount][j]], &gcrSectors[i][j]);
+                } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+                    // And another case for 1:1 interleave, which doesn't need an interleave table at all
+                    encodeSector(&decodedSectors[i][j], &gcrSectors[i][j]);
+                } else {
+                    // Otherwise we default to 2:1 interleave
+                    encodeSector(&decodedSectors[i][interleave2to1[sectorCount][j]], &gcrSectors[i][j]);
+                }
             }
         }
     }
     // Otherwise it's a single-sided disk, so just do side 0
     else {
         for (int i = 0; i < sectorCount; i++) {
-            encodeSector(&decodedSectors[0][i], &gcrSectors[0][i]);
+            if (metadata->header.diskFormat & 0x1F == 0x04) {
+                encodeSector(&decodedSectors[0][interleave4to1[sectorCount][i]], &gcrSectors[0][i]);
+            } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+                encodeSector(&decodedSectors[0][i], &gcrSectors[0][i]);
+            } else {
+                encodeSector(&decodedSectors[0][interleave2to1[sectorCount][i]], &gcrSectors[0][i]);
+            }
         }
     }
     //Serial.printf("Track encoding to GCR took %u microseconds\n", micros() - startTime);
@@ -255,14 +313,30 @@ void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSecto
     if (metadata->driveType == Drive800) {
         for(int i = 0; i < 2; i++) {
             for (int j = 0; j < sectorCount; j++) {
-                decodeSector(&gcrSectors[i][j], &decodedSectors[i][j]);
+                // Check which interleave table to use based on the interleave factor in the metadata
+                if (metadata->header.diskFormat & 0x1F == 0x04) {
+                    // We have a case for 4:1 interleave
+                    decodeSector(&gcrSectors[i][j], &decodedSectors[i][interleave4to1[sectorCount][j]]);
+                } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+                    // And another case for 1:1 interleave, which doesn't need an interleave table at all
+                    decodeSector(&gcrSectors[i][j], &decodedSectors[i][j]);
+                } else {
+                    // Otherwise we default to 2:1 interleave
+                    decodeSector(&gcrSectors[i][j], &decodedSectors[i][interleave2to1[sectorCount][j]]);
+                }
             }
         }
     }
     // Otherwise it's a single-sided disk, so just do side 0
     else {
         for (int i = 0; i < sectorCount; i++) {
-            decodeSector(&gcrSectors[0][i], &decodedSectors[0][i]);
+            if (metadata->header.diskFormat & 0x1F == 0x04) {
+                decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave4to1[sectorCount][i]]);
+            } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+                decodeSector(&gcrSectors[0][i], &decodedSectors[0][i]);
+            } else {
+                decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave2to1[sectorCount][i]]);
+            }
         }
     }
     //Serial.printf("Track decoding from GCR took %u microseconds\n", micros() - startTime);

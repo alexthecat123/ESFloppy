@@ -49,6 +49,7 @@ uint32_t tachDividerPerTrackMac[80] = {
 };
 
 // The Lisa uses a slightly different set of TACH pulse frequencies, so here's a separate set of LUTs for those
+// UPDATE 16-79 LATER; ONLY 0-15 ARE ACCURATE FOR NOW
 uint32_t tachPulsesPerTrackLisa[80] = {
     407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, // Tracks 0-15
     429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, // Tracks 16-31
@@ -67,10 +68,10 @@ uint32_t tachDividerPerTrackLisa[80] = {
 
 // Watchdog timer write enable register and value
 #define TIMG1_WDT_WE 0x050D83AA1
-#define TIMG1_WDT_WE_REG 0x3FF60064
+#define TIMG1_WDT_WE_REG 0x60020064
 
 // Watchdog timer configuration register and enable bit
-#define TIMG1_WDT_CONF_REG 0x3FF60048
+#define TIMG1_WDT_CONF_REG 0x60020048
 #define TIMG1_WDT_EN 1 << 31
 
 SPIClass SD_SPI(HSPI); // These two lines make sure that we use hardware SPI at 20MHz for the SD card
@@ -104,7 +105,7 @@ bool stepComplete = true;
 bool motorOn = false;
 
 bool ejectPending = false;
-uint16_t ejectStartTime;
+uint32_t ejectStartTime;
 uint32_t tachFreq = 0;
 
 bool dirty = false;
@@ -116,6 +117,36 @@ bool dirty = false;
 __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
     // Each bit time is 2us long; for a 1 bit, we send a falling edge at the start, followed by a rising edge 1us later
     // For a 0 bit, we just keep it high the whole time
+
+    // There's a good chance that RDA will be low coming into here if we were reading a different register before this
+    // So go ahead and set it high to start with so that we're all ready to send out a falling edge for a 1 bit if we need to
+    // Otherwise, if the first bit we send is a 1 bit, it'll be missed because we can't send a falling edge if RDA is already low
+    writeRDA(true);
+
+    // On a real drive, the disk doesn't stop turning just because we exited transmitTrack
+    // So if the Lisa exits transmitTrack to check status and reenters, we need to catch up to the current time to simulate the spinning disk
+    // You'd think that we'd be able to just pick up where we left off, which we can most of the time, but there's a problem with that
+    // The Lisa periodically polls /DRVIN once per sector, and tries to do it in phase with the sector sync field
+    // This way, the only data missed is some of the sync data, and we can recover with the remaining sync data when we return
+    // But sometimes the /DRVIN check gets a little out of phase and happens in the middle of data instead of sync
+    // Now we have a problem because the Lisa can't recover from that since there's no sync
+    // And retrying won't help because the /DRVIN will still be out of phase and hit the data again
+    // So the simple fix is to simulate the disk spinning while we're not in transmitTrack so that the phase constantly drifts instead of getting stuck out of sync
+    // This will lead to occasional errors, but they should be recoverable in one retry and won't be frequent
+    uint32_t currentTime = esp_cpu_get_cycle_count(); // To do this, start by getting the current time
+    uint32_t timeAway = currentTime - prevBitTime; // And then get the number of CPU cycles since the last bit time (the time that we were away)
+    if (timeAway > 480) {
+        // If we were away for more than 480 cycles (one full bit time), then we have catch-up work to do
+        inSectorIndex += timeAway / 480; // Increment the in-sector index by the number of full bit times that have passed
+        // But if this pushes it past the end of the sector, then we have even more work to do
+        if (inSectorIndex >= 5864) {
+            // Increment the current sector by the number of full sectors that have passed, wrapping around to sector 0 if necessary
+            currentSector = (currentSector + (inSectorIndex / 5864)) % sectorsPerTrack[currentTrack];
+            inSectorIndex %= 5864; // And then set the in-sector index to the appropriate spot within the new sector
+        }
+        prevBitTime = currentTime; // And finally, update the previous time to now
+    }
+
     while (1) {
         // Before we do anything, we need to check to see if the Lisa is still reading from the read data register to begin with
         // For the sake of speed, do a raw REG_READ here instead of using any helper functions
@@ -131,16 +162,16 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
         uint32_t side = (gpioIn & 1 << HDS) ? 1 : 0;
 
         // When we arrive here, we'll be on the first half of a bit, so just wait until it's time to send out that first half
-        while (esp_cpu_get_cycle_count() - prevBitTime <= 240); // Get the number of CPU cycles between now and the last bit time; esp_cpu_get_cycle_count() is faster than ESP.getCycleCount()
+        prevBitTime += 240;
+        while ((int32_t)(esp_cpu_get_cycle_count() - prevBitTime) < 0); // Get the number of CPU cycles between now and the last bit time; esp_cpu_get_cycle_count() is faster than ESP.getCycleCount()
         // Once that while loop finishes (240 cycles at 240MHz is 1us), it's time to send out the first half of our bit
-        prevBitTime = esp_cpu_get_cycle_count(); // First, reset the previous bit timer to the current time
         // Now we need to extract the next bit from trackBufferGCR[side][currentSector]
         GcrSector* gcrSector = &trackBufferGCR[side][currentSector]; // Get a pointer to the current GCR sector
-        uint32_t* gcrPtr = (uint32_t*)gcrSector; // And then get a uint32_t pointer to the sector data
-        uint32_t gcrWord = gcrPtr[inSectorIndex / 32]; // Then get the current word from the sector data
-        // Now we need to isolate the bit that we want from the word, keeping in mind that the ESP32 is little-endian
-        uint32_t bitMask = 1 << (31 - (inSectorIndex % 32)); // Create a mask for the bit we want
-        bool bit = (gcrWord & bitMask) != 0; // And finally extract the bit; that was a lot of work!
+        uint8_t* gcrPtr = (uint8_t*)gcrSector; // And then get a uint8_t pointer to the sector data
+        // And finally extract the bit; this line does several things in one
+        // First it extracts the byte we need from the sector by dividing the in-sector index by 8
+        // And then it shifts that byte to the right by 7 minus the remainder of the in-sector index divided by 8, which gives us the bit we want in the LSB
+        bool bit = (gcrPtr[inSectorIndex >> 3] >> (7 - (inSectorIndex & 7))) & 1;
         // Now we can send out the bit on RDA
         if (bit) {
             writeRDA(false); // Send a falling edge on RDA to indicate a 1 bit
@@ -149,8 +180,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
         }
         
         // Now we need to wait for the second half of the bit time, which is another 1us
-        while (esp_cpu_get_cycle_count() - prevBitTime <= 240);
-        prevBitTime = esp_cpu_get_cycle_count();
+        prevBitTime += 240;
+        while ((int32_t)(esp_cpu_get_cycle_count() - prevBitTime) < 0);
         // Time to send the second half of the bit; if it was a 1, we need to send a rising edge; if it was a 0, we just keep it high
         // We don't need to retrieve the bit again and check its value because regardless of whether it was a 0 or a 1, we need to set it high!
         writeRDA(true); // Nice and easy!
@@ -185,11 +216,6 @@ void updateOLED () {
 
 void setup() {
     init(); // Init the ESP32 Arduino core
-    // Just like ESProFile, we need to disable the interrupt watchdog timer
-    // For the sake of speed, we have to disable interrupts throughout our entire program, and the watchdog would trigger and break everything
-    //REG_WRITE(TIMG1_WDT_WE_REG, TIMG1_WDT_WE); // Enable writing to the watchdog timer registers
-    //REG_CLR_BIT(TIMG1_WDT_CONF_REG, TIMG1_WDT_EN); // And clear the timer's enable bit to disable it
-    //noInterrupts(); // Now that it's safe to do so, disable interrupts for the rest of the program
     Serial.begin(115200); // Start serial comms for debugging
     Serial.println("Starting ESFloppy...");
     initRMT(); // Initialize the RMT peripheral for floppy data transmission
@@ -266,6 +292,12 @@ void setup() {
     }
     //updateOLED(); // Update the OLED with the current status
     Serial.println("ESFloppy is ready!"); // If all this succeeds, print a ready message
+    // Just like ESProFile, we need to disable the interrupt watchdog timer
+    // For the sake of speed, we have to disable interrupts throughout our entire program, and the watchdog would trigger and break everything
+    REG_WRITE(TIMG1_WDT_WE_REG, TIMG1_WDT_WE); // Enable writing to the watchdog timer registers
+    REG_CLR_BIT(TIMG1_WDT_CONF_REG, TIMG1_WDT_EN); // And clear the timer's enable bit to disable it
+    delay(1000); // Wait a second for any pending interrupts to finish before we disable them
+    noInterrupts(); // Now that it's safe to do so, disable interrupts for the rest of the program
 }
 
 void loop() {
@@ -405,7 +437,7 @@ void loop() {
                         //// And preload a couple sectors into our RMT buffer to get ready for reading
                         //preloadSectors();
                         //updateOLED(); // Update the OLED with the current status
-                        Serial.println(currentTrack);
+                        //Serial.println(currentTrack);
                         stepComplete = true; // Once they're read in, mark that the step is complete
                     }
                     break;
