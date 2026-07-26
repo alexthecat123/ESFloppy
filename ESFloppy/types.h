@@ -56,9 +56,15 @@
 
 #define GPIO_FUNC4_OUT_SEL_CFG_REG (GPIO_BASE + 0x564)
 
+// The size of each GCR-encoded sector in bits
+#define BITS_PER_SECTOR (sizeof(GcrSector) * 8)
+
 // Lookup tables for the number of sectors per track and tachometer pulses per track
 extern uint32_t sectorsPerTrack[80];
-extern uint32_t tachPulsesPerTrack[80];
+extern uint32_t tachPulsesPerTrackMac[80];
+extern uint32_t tachDividerPerTrackMac[80];
+extern uint32_t tachPulsesPerTrackLisa[80];
+extern uint32_t tachDividerPerTrackLisa[80];
 
 // A decoded sector is super simple: just the track, sector, side, format, and 524 bytes of data
 // The only one of these that even needs explanation is the format byte, which is as follows:
@@ -77,7 +83,8 @@ struct DecodedSector {
 struct GcrSector {
     // First there's a header that comes before the data itself; it contains info about the sector
     // Before the header though, there are 6 sync bytes that the floppy state machine looks for to get in sync
-    uint8_t headerSync[6] = {0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF};
+    // But we need an inter-sector gap to make sure that the FDC is able to keep up at higher interleaves, so do 50 bytes instead
+    uint8_t headerSync[75] = {0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC};
     // And then a prologue to mark the start of the header
     uint8_t headerPrologue[3] = {0xD5, 0xAA, 0x96};
     // Then the actual header fields; first we have the low 6 bits of the track number
@@ -165,4 +172,6 @@ struct DiskImageMetadata {
     DriveType driveType;
     bool tagsPresent;
     bool diskInserted = false;
+    uint32_t startAddress; // The starting address of the disk image in the SD card file system
+    uint32_t endAddress; // And the end address
 };

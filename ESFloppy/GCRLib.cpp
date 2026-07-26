@@ -96,7 +96,7 @@ const uint8_t interleave4to1[13][12] = {
 void encodeSector(DecodedSector* decoded, GcrSector* gcr) {
     // First let's fill in the header fields, making sure to GCR-encode each one along the way
     uint8_t loTrack = decoded->track & 0x3F; // Low 6 bits of track
-    uint8_t sectorNum = decoded->sector; // Sector number gets pulled straight over
+    uint8_t sectorNum = decoded->sector & 0x3F; // Sector number gets pulled straight over, with a mask to keep it within 6 bits
     uint8_t hiTrackSide = ((decoded->track & 0x40) >> 6) | ((decoded->side & 0x01) << 5); // High track bit in bit 0, side in bit 5
     uint8_t format = decoded->format & 0x3F; // Format byte gets pulled straight over too; just isolate the low 6 bits to fit with GCR
     gcr->loTrack = gcr_6to8[loTrack]; // Low 6 bits of track
@@ -191,8 +191,12 @@ void encodeSector(DecodedSector* decoded, GcrSector* gcr) {
     gcr->dataChecksum[3] = gcr_6to8[nibl4];
 }
 
-void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
+bool decodeSector(GcrSector* gcr, DecodedSector* decoded) {
+    // Make a backup copy of the current contents of decoded so we can restore it if the sector we're decoding now is invalid
+    DecodedSector backup;
+    memcpy(&backup, decoded, sizeof(DecodedSector));
     // Decoding is (obviously) just the reverse of encoding; first do the header
+    bool sectorValid = true; // Assume the sector is valid until we find a problem
     // Reconstruct the track number from the low and high bits, decoding the GCR along the way
     decoded->track = gcr_8to6[gcr->loTrack] | ((gcr_8to6[gcr->hiTrackSide] & 0x01) << 6);
     // The sector comes straight over
@@ -201,12 +205,25 @@ void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
     decoded->side = (gcr_8to6[gcr->hiTrackSide] & 0x20) >> 5;
     // And the format byte comes straight over too
     decoded->format = gcr_8to6[gcr->format];
+    // Now check the header checksum; it should be the XOR of the other header fields
+    if (gcr_8to6[gcr->headerChecksum] != (gcr_8to6[gcr->loTrack] ^ gcr_8to6[gcr->sector] ^ gcr_8to6[gcr->hiTrackSide] ^ gcr_8to6[gcr->format])) {
+        sectorValid = false; // If not, then the header is invalid and we should mark the sector as bad
+    }
+    // Also check to make sure that all of the header fields are valid GCR bytes; if any of them are bigger than 6 bits, then they aren't
+    if ((gcr_8to6[gcr->loTrack] | gcr_8to6[gcr->sector] | gcr_8to6[gcr->hiTrackSide] | gcr_8to6[gcr->format] | gcr_8to6[gcr->headerChecksum]) & 0xC0) {
+        sectorValid = false;
+    }
+    // Also make sure that sector_again is the same as sector; sector_again isn't covered by the checksum
+    if (decoded->sector != gcr_8to6[gcr->sector_again]) {
+        sectorValid = false; // If not, then we're once again invalid
+    }
     // Now we've got to do the stupid data decoding algorithm
     uint16_t csumA = 0, csumB = 0;
     uint8_t csumC = 0;
     uint8_t carry;
     uint8_t byteA, byteB, byteC;
     uint8_t nibl1, nibl2, nibl3, nibl4;
+    uint8_t badNibls = 0; // Allows us to see if any of the data nibbles are invalid GCR bytes
     uint16_t i = 0; // Index for the GCR data array
     uint16_t j = 0; // Index for the decoded data array
     // Now we can start decoding the data itself
@@ -216,6 +233,7 @@ void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
         nibl2 = gcr_8to6[gcr->data[i++]];
         nibl3 = gcr_8to6[gcr->data[i++]];
         nibl4 = gcr_8to6[gcr->data[i++]];
+        badNibls |= nibl1 | nibl2 | nibl3 | nibl4; // If any of the nibbles are invalid GCR bytes, then the high 2 bits of badNibls will be set
         // Now reconstruct the bytes from those nibbles; grab the high 2 bits from nibl1 and the low 6 bits from nibl2, nibl3, and nibl4
         byteA = ((nibl1 & 0x30) << 2) | (nibl2 & 0x3F);
         byteB = ((nibl1 & 0x0C) << 4) | (nibl3 & 0x3F);
@@ -260,13 +278,31 @@ void decodeSector(GcrSector* gcr, DecodedSector* decoded) {
     // Now write the decoded bytes to the output data array
     decoded->data[j++] = byteA;
     decoded->data[j++] = byteB;
+
+    // Finally, check the data checksum for validity
+    nibl1 = gcr_8to6[gcr->dataChecksum[0]]; // Get the 4 GCR nibbles of the data checksum and convert them back to 6-bit values
+    nibl2 = gcr_8to6[gcr->dataChecksum[1]];
+    nibl3 = gcr_8to6[gcr->dataChecksum[2]];
+    nibl4 = gcr_8to6[gcr->dataChecksum[3]];
+    badNibls |= nibl1 | nibl2 | nibl3 | nibl4; // If any of the nibbles are invalid GCR bytes, then the high 2 bits of badNibls will be set
+    uint8_t storedCsumA = ((nibl1 & 0x30) << 2) | (nibl2 & 0x3F); // Now build the stored checksums from the nibbles
+    uint8_t storedCsumB = ((nibl1 & 0x0C) << 4) | (nibl3 & 0x3F);
+    uint8_t storedCsumC = ((nibl1 & 0x03) << 6) | (nibl4 & 0x3F);
+    if ((badNibls & 0xC0) || storedCsumA != csumA || storedCsumB != csumB || storedCsumC != csumC) {
+        sectorValid = false; // If any of the data nibbles are invalid GCR bytes, or if the checksums don't match, then the data is invalid
+    }
+    // If the sector was invalid, restore the backup copy of the decoded sector and return false
+    if (!sectorValid) {
+        memcpy(decoded, &backup, sizeof(DecodedSector));
+        return false;
+    }
+    return true; // Otherwise return true
 }
 
 // This function encodes an entire decoded track (all sectors) into GCR format
 // It takes the track number and a pointer to an array of DecodedSector structs as input
 // And outputs an array of GcrSector structs
 void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][12], GcrSector gcrSectors[2][12], DiskImageMetadata* metadata) {
-    uint32_t startTime = micros();
     // First we need to figure out how many sectors are on this track
     uint32_t sectorCount = sectorsPerTrack[track];
     // Now encode each sector into GCR format and put it in the output array
@@ -275,10 +311,10 @@ void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][12], GcrSec
         for(int i = 0; i < 2; i++) {
             for (int j = 0; j < sectorCount; j++) {
                 // Check which interleave table to use based on the interleave factor in the metadata
-                if (metadata->header.diskFormat & 0x1F == 0x04) {
+                if ((decodedSectors[0][0].format & 0x1F) == 0x04) {
                     // We have a case for 4:1 interleave
                     encodeSector(&decodedSectors[i][interleave4to1[sectorCount][j]], &gcrSectors[i][j]);
-                } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+                } else if ((decodedSectors[0][0].format & 0x1F) == 0x01) {
                     // And another case for 1:1 interleave, which doesn't need an interleave table at all
                     encodeSector(&decodedSectors[i][j], &gcrSectors[i][j]);
                 } else {
@@ -291,21 +327,19 @@ void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][12], GcrSec
     // Otherwise it's a single-sided disk, so just do side 0
     else {
         for (int i = 0; i < sectorCount; i++) {
-            if (metadata->header.diskFormat & 0x1F == 0x04) {
+            if ((decodedSectors[0][0].format & 0x1F) == 0x04) {
                 encodeSector(&decodedSectors[0][interleave4to1[sectorCount][i]], &gcrSectors[0][i]);
-            } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+            } else if ((decodedSectors[0][0].format & 0x1F) == 0x01) {
                 encodeSector(&decodedSectors[0][i], &gcrSectors[0][i]);
             } else {
                 encodeSector(&decodedSectors[0][interleave2to1[sectorCount][i]], &gcrSectors[0][i]);
             }
         }
     }
-    //Serial.printf("Track encoding to GCR took %u microseconds\n", micros() - startTime);
 }
 
 // This function decodes an entire GCR track (all sectors) into decoded format
 void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSector decodedSectors[2][12], DiskImageMetadata* metadata) {
-    uint32_t startTime = micros();
     // First we need to figure out how many sectors are on this track
     uint32_t sectorCount = sectorsPerTrack[track];
     // Now decode each sector from GCR format into decoded format
@@ -314,10 +348,10 @@ void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSecto
         for(int i = 0; i < 2; i++) {
             for (int j = 0; j < sectorCount; j++) {
                 // Check which interleave table to use based on the interleave factor in the metadata
-                if (metadata->header.diskFormat & 0x1F == 0x04) {
+                if ((decodedSectors[i][j].format & 0x1F) == 0x04) {
                     // We have a case for 4:1 interleave
                     decodeSector(&gcrSectors[i][j], &decodedSectors[i][interleave4to1[sectorCount][j]]);
-                } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+                } else if ((decodedSectors[i][j].format & 0x1F) == 0x01) {
                     // And another case for 1:1 interleave, which doesn't need an interleave table at all
                     decodeSector(&gcrSectors[i][j], &decodedSectors[i][j]);
                 } else {
@@ -330,14 +364,13 @@ void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSecto
     // Otherwise it's a single-sided disk, so just do side 0
     else {
         for (int i = 0; i < sectorCount; i++) {
-            if (metadata->header.diskFormat & 0x1F == 0x04) {
+            if ((decodedSectors[0][i].format & 0x1F) == 0x04) {
                 decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave4to1[sectorCount][i]]);
-            } else if (metadata->header.diskFormat & 0x1F == 0x01) {
+            } else if ((decodedSectors[0][i].format & 0x1F) == 0x01) {
                 decodeSector(&gcrSectors[0][i], &decodedSectors[0][i]);
             } else {
                 decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave2to1[sectorCount][i]]);
             }
         }
     }
-    //Serial.printf("Track decoding from GCR took %u microseconds\n", micros() - startTime);
 }

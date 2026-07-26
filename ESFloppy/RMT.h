@@ -39,7 +39,7 @@ inline __attribute__((__always_inline__)) void RMTControl() {
     // Route RMT channel 0 to GPIO4 (RDA pin)
     REG_WRITE(GPIO_FUNC4_OUT_SEL_CFG_REG, ((REG_READ(GPIO_FUNC4_OUT_SEL_CFG_REG) & 0xFFFFFE00) | 81));
     // Print out GPIO_FUNC4_OUT_SEL_CFG_REG in binary to verify our settings
-    Serial.printf("GPIO_FUNC4_OUT_SEL_CFG_REG: %x\n", REG_READ(GPIO_FUNC4_OUT_SEL_CFG_REG));
+    //Serial.printf("GPIO_FUNC4_OUT_SEL_CFG_REG: %x\n", REG_READ(GPIO_FUNC4_OUT_SEL_CFG_REG));
 }
 
 // Gives GPIO control over the RDA pin

@@ -99,5 +99,5 @@ __attribute__((optimize("Ofast"))) void convertGCRToRMT(GcrSector* gcr, RMTSecto
         out[7] = src[7];
         out += 8;
     }
-    Serial.printf("GCR to RMT conversion took %u microseconds\n", micros() - startTime);
+    //Serial.printf("GCR to RMT conversion took %u microseconds\n", micros() - startTime);
 }

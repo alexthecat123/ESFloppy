@@ -49,21 +49,20 @@ uint32_t tachDividerPerTrackMac[80] = {
 };
 
 // The Lisa uses a slightly different set of TACH pulse frequencies, so here's a separate set of LUTs for those
-// UPDATE 16-79 LATER; ONLY 0-15 ARE ACCURATE FOR NOW
 uint32_t tachPulsesPerTrackLisa[80] = {
     407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, 407, // Tracks 0-15
-    429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, 429, // Tracks 16-31
-    472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, 472, // Tracks 32-47
-    525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, 525, // Tracks 48-63
-    578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, 578, // Tracks 64-79
+    443, 443, 443, 443, 443, 443, 443, 443, 443, 443, 443, 443, 443, 443, 443, 443, // Tracks 16-31
+    489, 489, 489, 489, 489, 489, 489, 489, 489, 489, 489, 489, 489, 489, 489, 489, // Tracks 32-47
+    545, 545, 545, 545, 545, 545, 545, 545, 545, 545, 545, 545, 545, 545, 545, 545, // Tracks 48-63
+    613, 613, 613, 613, 613, 613, 613, 613, 613, 613, 613, 613, 613, 613, 613, 613, // Tracks 64-79
 };
 
 uint32_t tachDividerPerTrackLisa[80] = {
     196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, 196560, // Tracks 0-15
-    186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, 186480, // Tracks 16-31
-    169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, 169491, // Tracks 32-47
-    152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, 152380, // Tracks 48-63
-    138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, 138408, // Tracks 64-79
+    180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, 180586, // Tracks 16-31
+    163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, 163599, // Tracks 32-47
+    146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, 146788, // Tracks 48-63
+    130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, 130505, // Tracks 64-79
 };
 
 // Watchdog timer write enable register and value
@@ -81,6 +80,7 @@ SPIClass SD_SPI(HSPI); // These two lines make sure that we use hardware SPI at 
 Adafruit_SH1106G OLED = Adafruit_SH1106G(128, 64, &Wire, -1);
 
 SdFat32 SDCard; // The SD card object
+SdCard* card; // A pointer to the card object so we can use it in other files
 File32 disk; // The disk image that ESFloppy is using
 FatFile rootDir; // The root directory of the SD card
 
@@ -91,6 +91,7 @@ static GcrSector trackBufferGCR[2][12]; // Buffer for GCR-encoded sectors for ea
 uint32_t currentSector = 0;
 uint32_t inSectorIndex = 0;
 uint32_t currentTrack = 0;
+bool trackChanged = false;
 uint32_t bitTime = 0;
 uint32_t prevBitTime = 0;
 
@@ -123,6 +124,13 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
     // Otherwise, if the first bit we send is a 1 bit, it'll be missed because we can't send a falling edge if RDA is already low
     writeRDA(true);
 
+    // There's a chance that we just arrived here after switching from one track class to another (like from 12 sectors per track to 11)
+    // And in that case, there's a possibility that the current sector is now out of bounds for the new track class
+    // So check for that and reset it to 0 if it's out of bounds
+    if (currentSector >= sectorsPerTrack[currentTrack]) {
+        currentSector = 0;
+    }
+
     // On a real drive, the disk doesn't stop turning just because we exited transmitTrack
     // So if the Lisa exits transmitTrack to check status and reenters, we need to catch up to the current time to simulate the spinning disk
     // You'd think that we'd be able to just pick up where we left off, which we can most of the time, but there's a problem with that
@@ -135,16 +143,23 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
     // This will lead to occasional errors, but they should be recoverable in one retry and won't be frequent
     uint32_t currentTime = esp_cpu_get_cycle_count(); // To do this, start by getting the current time
     uint32_t timeAway = currentTime - prevBitTime; // And then get the number of CPU cycles since the last bit time (the time that we were away)
-    if (timeAway > 480) {
+    if (timeAway > 480 && trackChanged == false) {
         // If we were away for more than 480 cycles (one full bit time), then we have catch-up work to do
         inSectorIndex += timeAway / 480; // Increment the in-sector index by the number of full bit times that have passed
         // But if this pushes it past the end of the sector, then we have even more work to do
-        if (inSectorIndex >= 5864) {
+        if (inSectorIndex >= BITS_PER_SECTOR) {
             // Increment the current sector by the number of full sectors that have passed, wrapping around to sector 0 if necessary
-            currentSector = (currentSector + (inSectorIndex / 5864)) % sectorsPerTrack[currentTrack];
-            inSectorIndex %= 5864; // And then set the in-sector index to the appropriate spot within the new sector
+            currentSector = (currentSector + (inSectorIndex / BITS_PER_SECTOR)) % sectorsPerTrack[currentTrack];
+            inSectorIndex %= BITS_PER_SECTOR; // And then set the in-sector index to the appropriate spot within the new sector
         }
         prevBitTime = currentTime; // And finally, update the previous time to now
+    } else if (trackChanged == true) {
+        // If the track has changed, then we need to reset the in-sector index and current sector to 0 and not do a catch-up
+        // This isn't necessary, but it speeds things up since the FDC normally starts reading new tracks from sector 0, so might as well start there
+        currentSector = 0; // So make those updates
+        inSectorIndex = 0;
+        prevBitTime = currentTime; // Set the previous time to now
+        trackChanged = false; // And mark that we've handled the track change
     }
 
     while (1) {
@@ -188,7 +203,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
         
         // We now need to increment to the next bit in the sector
         inSectorIndex++;
-        if (inSectorIndex >= 5864) {
+        if (inSectorIndex >= BITS_PER_SECTOR) {
             // If we're about to go past the end of the sector, we need to move to the next one
             currentSector++;
             if (currentSector >= sectorsPerTrack[currentTrack]) {
@@ -218,11 +233,9 @@ void setup() {
     init(); // Init the ESP32 Arduino core
     Serial.begin(115200); // Start serial comms for debugging
     Serial.println("Starting ESFloppy...");
-    initRMT(); // Initialize the RMT peripheral for floppy data transmission
     initLEDC(RDA); // Initialize the LEDC peripheral on the RDA pin for sending TACH pulses
     setDuty(128); // Set the LEDC duty cycle to 50%
     enableLEDCOutput(true); // And enable its output (note that this doesn't actually connect it to the pin though)
-    //GPIOControl(); // Give the GPIO (not RMT) control over the RDA pin initially
     initPins(); // Set all of ESFloppy's pins to the correct direction and state
     SD_SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); // Start comms with the SD card using our hardware SPI instance
     // Now initialize the OLED
@@ -242,7 +255,12 @@ void setup() {
         OLED.display();
         while(1);
     }
+    card = SDCard.card(); // Now that the card is initialized, store a pointer to its object
     rootDir.open("/"); // Then open the card's root directory
+    //My Lisa Stuff/MWP/MW_1.018_Install.img
+    //test_image.dc42
+    //My Lisa Stuff/LOS 3 Debozoed/LisaCalc.dc42
+    //My Lisa Stuff/MacWorks Plus II Install.image
     if (!openImage("test_image.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
         Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
         OLED.clearDisplay();
@@ -253,27 +271,9 @@ void setup() {
         OLED.display();
         while(1); // If we fail to open the image, just hang here
     }
-    // Now do a test read and write of track 0
-    readTrack(0, &disk, trackBufferDecoded, &diskMetadata); // Read track 0 into the decoded buffer
-    // Now print out the contents of every sector (on both sides of the disk) for debugging, and divide it up by side and sector
-    /*for (int side = 0; side < 2; side++) {
-        for (int sector = 0; sector < sectorsPerTrack[0]; sector++) {
-            Serial.print("Side ");; Serial.print(side); Serial.print(", Sector "); Serial.print(sector); Serial.println(":");
-            for (int i = 0; i < 524; i++) {
-                if (i % 16 == 0) {
-                    Serial.println(); // New line every 16 bytes
-                }
-                uint8_t byteToPrint = trackBufferDecoded[side][sector].data[i];
-                if (byteToPrint < 0x10) {
-                    Serial.print("0"); // Leading zero for single-digit values
-                }
-                Serial.print(byteToPrint, HEX); Serial.print(" ");
-            }
-            Serial.println(); Serial.println(); // Two new lines after each sector
-        }
-    }*/
+    // Read and encode track 0 so that we can start sending it out when the Lisa requests it
+    readTrack(0, &disk, trackBufferDecoded, &diskMetadata);
     encodeTrackToGCR(0, trackBufferDecoded, trackBufferGCR, &diskMetadata);
-    //preloadSectors(); // Preload sectors 0 and 1 of both sides into the RMT buffers
     // For testing purposes, let's modify sector 0's data a bit
     // Invert all 524 bytes of all the sectors on both sides of track 0
     /*for (int side = 0; side < 2; side++) {
@@ -296,7 +296,7 @@ void setup() {
     // For the sake of speed, we have to disable interrupts throughout our entire program, and the watchdog would trigger and break everything
     REG_WRITE(TIMG1_WDT_WE_REG, TIMG1_WDT_WE); // Enable writing to the watchdog timer registers
     REG_CLR_BIT(TIMG1_WDT_CONF_REG, TIMG1_WDT_EN); // And clear the timer's enable bit to disable it
-    delay(1000); // Wait a second for any pending interrupts to finish before we disable them
+    delay(100); // Wait a little bit to let the Serial.println finish before we actually kill interrupts
     noInterrupts(); // Now that it's safe to do so, disable interrupts for the rest of the program
 }
 
@@ -325,11 +325,7 @@ void loop() {
                 // Only do this if it's not already detached since repeatedly detaching it wastes tons of time
                 ledcAttached = false;
                 GPIOControl(RDA); // Give the GPIO registers control of the RDA pin back so we can bit-bang data to it
-                //ledcDetach(RDA);
             }
-            /*if (regNum != 8 && regNum != 9) { // If we're not reading RDDATA for either head, make sure to give control of RDA back to GPIO (not the RMT)
-                GPIOControl();
-            }*/
             switch (regNum) {
                 case 0: // /DIRTN register (head step direction)
                     writeRDA(stepDirection);
@@ -362,25 +358,17 @@ void loop() {
                         ledcAttached = true; // Mark that the LEDC is attached so we don't attach/detach it unnecessarily
                     }
                     // If the motor is off, just output a constant low
-                    else {
+                    else if (!motorOn) {
                         writeRDA(0);
                     }
                     break;
                 case 8: // RDDATA register for head 0
-                    //RMTControl(); // First hand over control of RDA to the RMT so it can send data to the Lisa
-                    // Assuming the motor is running, the drive should already be sending data
-                    // The calls to transmitTrack just ensure that the RMT's buffer always stays full
-                    // The 0 means side 0
-
                     // If the drive's motor is running, then transmit data for side 0; otherwise, do nothing
                     if (motorOn) {
                         transmitTrack();
                     }
                     break;
                 case 9: // RDDATA register for head 1; only valid for 800k drives
-                    // Do the same thing we did for RDDATA for side 0, except now it's side 1
-                    //RMTControl();
-
                     // If the drive's motor is running, then transmit data for side 1; otherwise, do nothing
                     if (motorOn) {
                         transmitTrack();
@@ -413,6 +401,7 @@ void loop() {
                     if (regData == 0 && stepComplete == true) { // If the host is trying to step the heads and we're not already in the middle of a step
                         stepComplete = false; // Mark that a step is in progress
                         writeRDA(stepComplete); // And set the STEP register low to indicate that we're busy stepping
+                        trackChanged = true; // Mark that the track has changed so we can reset the sector back to 0 in transmitTrack
                         // Before we step, check the dirty bit to see if the current track was modified
                         if (dirty == true) {
                             // If so, write the current track back to the disk image before we seek away
@@ -432,26 +421,20 @@ void loop() {
                             }
                         }
                         // Now that we've updated the track number, we need to read in all the sectors for this new track from the disk image
+                        //interrupts();
                         readTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata);
+                        //noInterrupts();
                         encodeTrackToGCR(currentTrack, trackBufferDecoded, trackBufferGCR, &diskMetadata);
-                        //// And preload a couple sectors into our RMT buffer to get ready for reading
-                        //preloadSectors();
                         //updateOLED(); // Update the OLED with the current status
-                        //Serial.println(currentTrack);
+                        interrupts();
+                        Serial.println(currentTrack);
+                        noInterrupts();
                         stepComplete = true; // Once they're read in, mark that the step is complete
                     }
                     break;
                 case 4: // /MOTORON register (low to turn motor on, high to turn motor off)
                     motorOn = (regData == 0);
                     //updateOLED(); // Update the OLED with the current status
-                    /*// We also only want the "read head" to send out a bitstream when the motor is on
-                    // So we implement that with the transmit
-                    if (motorOn) {
-                        startRMT(); // Start the RMT if the motor is turned on
-                    }
-                    else {
-                        stopRMT(); // And stop it if the motor is turned off
-                    }*/
                     // Turn on the activity LED whenever the motor is on too
                     if (motorOn) {
                         REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED);
@@ -476,7 +459,7 @@ void loop() {
                     else if (ejectPending == true) { // Otherwise, if an eject is pending, check if 500ms has passed
                         if (millis() - ejectStartTime >= 500) {
                             // If so, eject the disk
-                            diskMetadata.diskInserted = false;
+                            closeImage(&disk, &diskMetadata); // Close the disk image file
                             motorOn = false; // Turn off the motor too
                             ejectPending = false;
                             //updateOLED(); // Update the OLED with the current status
