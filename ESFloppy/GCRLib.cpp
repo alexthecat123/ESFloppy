@@ -5,7 +5,7 @@
 
 // Lookup tables for GCR encoding and decoding
 // This table converts 6-bit nibbles to 8-bit GCR bytes
-const uint8_t gcr_6to8[64] = {
+extern const uint8_t gcr_6to8[64] = {
     0x96, 0x97, 0x9A, 0x9B, 0x9D, 0x9E, 0x9F, 0xA6,
     0xA7, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB2, 0xB3,
     0xB4, 0xB5, 0xB6, 0xB7, 0xB9, 0xBA, 0xBB, 0xBC,
@@ -17,7 +17,7 @@ const uint8_t gcr_6to8[64] = {
 };
 
 // And this one converts 8-bit GCR bytes back to 6-bit nibbles
-const uint8_t gcr_8to6[256] = {
+extern const uint8_t gcr_8to6[256] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -57,7 +57,7 @@ const uint8_t gcr_8to6[256] = {
 // So anything that's not 1:1, 2:1, or 4:1 will just be treated as 2:1
 // These interleave tables have to be valid for all 5 track sizes (12, 11, 10, 9, and 8 sectors per track)
 // Each table is indexed like table[sectorsPerTrack][slot] where sectorsPerTrack is the number of sectors on the current track and slot is the physical slot number (0-11) that we're trying to find the logical sector for
-const uint8_t interleave2to1[13][12] = {
+extern const uint8_t interleave2to1[13][12] = {
     {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 0 sectors/track (unused)
     {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 1 sector/track (unused)
     {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 2 sectors/track (unused)
@@ -76,7 +76,7 @@ const uint8_t interleave2to1[13][12] = {
 // Same idea for 4:1 interleave
 // Note that 4 and 8 share a common factor, so a true 4:1 layout is impossible on an 8-sector track;
 // that row ends up alternating 4 and 5 slots between consecutive logical sectors, which is as close as it gets
-const uint8_t interleave4to1[13][12] = {
+extern const uint8_t interleave4to1[13][12] = {
     {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 0 sectors/track (unused)
     {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 1 sector/track (unused)
     {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 2 sectors/track (unused)
@@ -348,10 +348,12 @@ void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSecto
         for(int i = 0; i < 2; i++) {
             for (int j = 0; j < sectorCount; j++) {
                 // Check which interleave table to use based on the interleave factor in the metadata
-                if ((decodedSectors[i][j].format & 0x1F) == 0x04) {
+                // Use the format from gcrSectors instead of decodedSectors since gcrSectors might have been modified by a format op from the Lisa
+                // And this change won't have been committed to decodedSectors yet
+                if ((gcr_8to6[gcrSectors[i][j].format] & 0x1F) == 0x04) {
                     // We have a case for 4:1 interleave
                     decodeSector(&gcrSectors[i][j], &decodedSectors[i][interleave4to1[sectorCount][j]]);
-                } else if ((decodedSectors[i][j].format & 0x1F) == 0x01) {
+                } else if ((gcr_8to6[gcrSectors[i][j].format] & 0x1F) == 0x01) {
                     // And another case for 1:1 interleave, which doesn't need an interleave table at all
                     decodeSector(&gcrSectors[i][j], &decodedSectors[i][j]);
                 } else {
@@ -364,9 +366,9 @@ void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSecto
     // Otherwise it's a single-sided disk, so just do side 0
     else {
         for (int i = 0; i < sectorCount; i++) {
-            if ((decodedSectors[0][i].format & 0x1F) == 0x04) {
+            if ((gcr_8to6[gcrSectors[0][i].format] & 0x1F) == 0x04) {
                 decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave4to1[sectorCount][i]]);
-            } else if ((decodedSectors[0][i].format & 0x1F) == 0x01) {
+            } else if ((gcr_8to6[gcrSectors[0][i].format] & 0x1F) == 0x01) {
                 decodeSector(&gcrSectors[0][i], &decodedSectors[0][i]);
             } else {
                 decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave2to1[sectorCount][i]]);

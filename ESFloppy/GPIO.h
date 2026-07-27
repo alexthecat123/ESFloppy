@@ -126,5 +126,5 @@ void initPins() {
     setParallelDir(0); // Set the FPGA bus to input mode
     pinMode(PWM, INPUT);
     digitalWrite(LED, LOW); // Turn off the LED initially
-    digitalWrite(RDA, LOW); // And keep RDA low
+    digitalWrite(RDA, HIGH); // And keep RDA high to signify no drive connected until everything is set up
 }

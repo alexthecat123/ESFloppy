@@ -59,6 +59,16 @@
 // The size of each GCR-encoded sector in bits
 #define BITS_PER_SECTOR (sizeof(GcrSector) * 8)
 
+// The header and data prologues for a GCR sector
+#define HEADER_PROLOGUE 0xD5AA96
+#define DATA_PROLOGUE 0xD5AAAD
+
+// The timings (in CPU cycles) for the various bit reception cells during a write operation
+// These are used to determine what bit pattern was sent by the Lisa based on the time between edges on WRD
+#define BIT_TIME_1 717 // 2us with some tolerance (1.5 bit cells)
+#define BIT_TIME_01 1195 // 4us with some tolerance (2.5 bit cells)
+#define BIT_TIME_001 1673 // 6us with some tolerance (3.5 bit cells)
+
 // Lookup tables for the number of sectors per track and tachometer pulses per track
 extern uint32_t sectorsPerTrack[80];
 extern uint32_t tachPulsesPerTrackMac[80];
@@ -149,6 +159,13 @@ enum ImageType {
 enum StepDirection {
     IN = false,
     OUT = true
+};
+
+// And yet another for what state of a write operation we're in
+enum WriteState {
+    PROLOGUE, // We're still searching for the prologue
+    HEADER, // It was a header prologue, so we're now reading the header
+    DATA // It was a data prologue, so we're now reading the data
 };
 
 // The structure of a DC42 disk image header
