@@ -111,6 +111,165 @@ uint32_t tachFreq = 0;
 
 bool dirty = false;
 
+// This enum defines the different commands that we can send to the SD card task
+enum SdTaskCommand {
+    READ_TRACK, // Just read a track and encode it to GCR
+    WRITE_READ_TRACK, // Write out a track and then read in another
+    CLOSE_IMAGE // Close the disk image file with closeImage()
+};
+
+// This struct is used to pass data to the SD card access task that runs on the other core
+struct SdTaskInterface {
+    uint8_t writeTrack; // What track to write
+    uint8_t readTrack; // What track to read
+    SdTaskCommand command; // What command to execute
+    bool start; // We set this high to tell the task to start processing our requect
+    bool finished; // The task sets this high when it's finished processing our request
+    bool initDone; // This goes high when the task is done initializing itelf
+};
+
+// Make an SdTaskInterface struct; make sure it's static and volatile since it's shared between two cores
+static volatile SdTaskInterface sdTaskInterface = {0, 0, READ_TRACK, false, true, false};
+
+// This is set if we have a full sector or header in the pending write buffer that we need to write out once the SD task is done reading in the track
+bool writeBufferPending = false;
+
+
+void updateOLED () {
+    static uint32_t prevTrack = 0xFFFFFFFF;
+    static uint32_t prevMotorOn = 0xFFFFFFFF;
+    static uint32_t prevImageType = 0xFFFFFFFF;
+    static uint32_t prevDriveType = 0xFFFFFFFF;
+    static uint32_t prevDiskInserted = 0xFFFFFFFF;
+    static uint32_t prevEjectPending = 0xFFFFFFFF;
+    if (prevTrack == currentTrack && prevMotorOn == motorOn && prevImageType == diskMetadata.imageType && prevDriveType == diskMetadata.driveType && prevDiskInserted == diskMetadata.diskInserted && prevEjectPending == ejectPending) {
+        return; // If nothing has changed, don't update the display
+    }
+    OLED.clearDisplay();
+    //OLED.setTextSize(1);
+    //OLED.setTextColor(SH110X_WHITE);
+    OLED.setCursor(0, 0);
+    OLED.print("Track: "); OLED.println(currentTrack);
+    OLED.print("Motor: "); OLED.println(motorOn ? "ON" : "OFF");
+    OLED.print("Image Type: "); OLED.println(diskMetadata.imageType == DC42 ? "DC42" : "RAW");
+    OLED.print("Drive Type: "); OLED.println(diskMetadata.driveType == Drive400 ? "400K" : "800K");
+    OLED.print("Disk in Place: "); OLED.println(diskMetadata.diskInserted ? "YES" : "NO");
+    OLED.print("Eject Pending: "); OLED.println(ejectPending ? "YES" : "NO");
+    OLED.display();
+
+    prevTrack = currentTrack;
+    prevMotorOn = motorOn;
+    prevImageType = diskMetadata.imageType;
+    prevDriveType = diskMetadata.driveType;
+    prevDiskInserted = diskMetadata.diskInserted;
+    prevEjectPending = ejectPending;
+}
+
+struct DbgMsg { uint8_t code; int32_t value; };
+static volatile DbgMsg dbgRing[16];
+static volatile uint8_t dbgHead = 0, dbgTail = 0;
+
+// interface core — never blocks, drops on overflow
+static inline void dbg(uint8_t code, int32_t value) {
+    uint8_t next = (dbgHead + 1) & 15;
+    if (next == dbgTail) return;
+    dbgRing[dbgHead].code = code;
+    dbgRing[dbgHead].value = value;
+    __sync_synchronize();
+    dbgHead = next;
+}
+
+// This is the SD card access task that runs on the other core
+// It handles all the SD card ops so that we don't block the timing-sensitive stuff on the main core
+void sdCardTask(void* parameter) {
+    Serial.begin(115200); // Serial is handled from this task, so start it here
+    Serial.println("Starting ESFloppy...");
+    SD_SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); // Start comms with the SD card using our hardware SPI instance
+    // Now initialize the OLED
+    Wire.begin(OLED_SDA, OLED_SCL); // Start the I2C bus for the OLED
+    OLED.begin(0x3C, true); // And init it
+    // Clear the display since there might be garbage on it after reset
+    OLED.clearDisplay();
+    OLED.display();
+    // And now move onto the SD card
+    if (!SDCard.begin(SD_CONFIG)) { // Initialize the SD card with our hardware SPI instance
+        Serial.println("SD card initialization failed! Halting..."); // And print an error/go into an infinite loop on failure
+        OLED.clearDisplay();
+        OLED.setTextSize(2);
+        OLED.setTextColor(SH110X_WHITE);
+        OLED.setCursor(0, 0);
+        OLED.print("SD Init Failed!");
+        OLED.display();
+        while(1);
+    }
+    card = SDCard.card(); // Now that the card is initialized, store a pointer to its object
+    rootDir.open("/"); // Then open the card's root directory
+    //My Lisa Stuff/MWP/MW_1.018_Install.img
+    //test_image.dc42
+    //My Lisa Stuff/LOS 3 Debozoed/LisaCalc.dc42
+    //My Lisa Stuff/MacWorks Plus II Install.image
+    //LisaTest 3.0 1.image
+    if (!openImage("copy_image_800k.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
+        Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
+        OLED.clearDisplay();
+        OLED.setTextSize(2);
+        OLED.setTextColor(SH110X_WHITE);
+        OLED.setCursor(0, 0);
+        OLED.print("Can't Open Disk!");
+        OLED.display();
+        while(1); // If we fail to open the image, just hang here
+    }
+    // Read and encode track 0 so that we can start sending it out when the Lisa requests it
+    readTrack(0, &disk, trackBufferDecoded, &diskMetadata);
+    encodeTrackToGCR(0, trackBufferDecoded, trackBufferGCR, &diskMetadata);
+    OLED.setTextSize(1); // Set the OLED text size to 1 and color to white
+    OLED.setTextColor(SH110X_WHITE);
+    for(int i = 0; i < 80; i++) {
+        setFreq(tachPulsesPerTrackLisa[i], 8);
+    }
+    Serial.println("ESFloppy is ready!"); // And if all this succeeds, print a ready message
+    // Make sure that everything above here is truly done before we continue
+    __sync_synchronize();
+    sdTaskInterface.initDone = true; // Set initDone to tell the main task that we're done initializing now
+    // We don't ever want this task to exit, so infinite-loop in here
+    while (1) {
+        if (!sdTaskInterface.start) {
+            // If we haven't been told to start processing a request, then just wait a little while and check again
+            while (dbgTail != dbgHead) {
+                Serial.printf("%u %ld\n", dbgRing[dbgTail].code, (long)dbgRing[dbgTail].value);
+                dbgTail = (dbgTail + 1) & 15;
+            }
+            //updateOLED(); // Update the OLED display with the current status; this only actually writes the display if something on the screen changed
+            vTaskDelay(1);
+            continue;
+        }
+        // Otherwise, we need to get to work processing the request
+        // First, call __sync_synchronize to make sure that the compiler doesn't optimize/rearrange any of our accesses to the shared sdTaskInterface struct
+        // Basically, it ensures that everything above __sync_synchronize is done before everything below it
+        // If we put a corresponding call at the site where we set start = true, then we can be sure that optimization doesn't cause the two tasks to write the struct at the same time
+        __sync_synchronize();
+        // Things are pretty easy from here on; first check if we need to write a track, and if so, do it
+        if (sdTaskInterface.command == WRITE_READ_TRACK) {
+            decodeTrackFromGCR(sdTaskInterface.writeTrack, trackBufferGCR, trackBufferDecoded, &diskMetadata);
+            writeTrack(sdTaskInterface.writeTrack, &disk, trackBufferDecoded, &diskMetadata);
+        }
+        if (sdTaskInterface.command == READ_TRACK || sdTaskInterface.command == WRITE_READ_TRACK) {
+            // If the command is either a read OR write, then we now need to read the requested track and encode it to GCR
+            readTrack(sdTaskInterface.readTrack, &disk, trackBufferDecoded, &diskMetadata);
+            encodeTrackToGCR(sdTaskInterface.readTrack, trackBufferDecoded, trackBufferGCR, &diskMetadata);
+        }
+        else if (sdTaskInterface.command == CLOSE_IMAGE) {
+            // If the command is to close the disk image, then obey
+            closeImage(&disk, &diskMetadata);
+        }
+        // Now that we're done, synchronize again to make sure that everything above here is truly done before we say we're done
+        __sync_synchronize();
+        // And finally, set finished high and start low to tell the main core that we're done
+        sdTaskInterface.start = false;
+        sdTaskInterface.finished = true;
+    }
+}
+
 // This function will get called whenever the Lisa is accessing the floppy's read data register
 // It checks if it's time to send out a new flux transition, and if so, it bit-bangs it out on the RDA pin
 // For the sake of speed, we don't return from here until the Lisa stops reading from the read data register
@@ -187,13 +346,20 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
         while ((int32_t)(esp_cpu_get_cycle_count() - prevBitTime) < 0); // Get the number of CPU cycles between now and the last bit time; esp_cpu_get_cycle_count() is faster than ESP.getCycleCount()
         // Once that while loop finishes (240 cycles at 240MHz is 1us), it's time to send out the first half of our bit
         // Now we need to extract the next bit from trackBufferGCR[side][currentSector]
-        GcrSector* gcrSector = &trackBufferGCR[side][currentSector]; // Get a pointer to the current GCR sector
-        uint8_t* gcrPtr = (uint8_t*)gcrSector; // And then get a uint8_t pointer to the sector data
-        // And finally extract the bit; this line does several things in one
-        // First it extracts the byte we need from the sector by dividing the in-sector index by 8
-        // And then it shifts that byte to the right by 7 minus the remainder of the in-sector index divided by 8, which gives us the bit we want in the LSB
-        bool bit = (gcrPtr[inSectorIndex >> 3] >> (7 - (inSectorIndex & 7))) & 1;
-        // Now we can send out the bit on RDA
+        // But there's a catch: trackBufferGCR may not be ready yet if the SD task on the other core is still running
+        // So we need to wait until it's finished before we read the track buffer and just send out the FF sync pattern until then
+        // The Lisa won't care; it'll just think that the disk hasn't spun around to the next sector yet and will patiently wait for us
+        static const uint8_t syncPattern[5] = {0xFF, 0x3F, 0xCF, 0xF3, 0xFC};
+        uint8_t currentByte;
+        if (sdTaskInterface.finished) {
+            // If the SD task is finished, then we can sedn out the next bit from the track buffer
+            currentByte = ((uint8_t*)&trackBufferGCR[side][currentSector])[inSectorIndex >> 3]; // Get the byte that contains the bit we want
+        } else {
+            // If the SD task is not finished, then we need to send out the sync pattern
+            currentByte = syncPattern[(inSectorIndex >> 3) % 5];
+        }
+        bool bit = (currentByte >> (7 - (inSectorIndex & 0x07))) & 0x01; // Extract the bit we want from the byte
+        // And now we can send out the bit on RDA
         if (bit) {
             writeRDA(false); // Send a falling edge on RDA to indicate a 1 bit
         } else {
@@ -291,6 +457,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
     // This holds what state of the write op we're in; we start in PROLOGUE since the first thing we do is hunt for the prologue
     // We never modify this directly; we pass it to processRawWriteData, which updates it as needed
     WriteState writeState = PROLOGUE;
+    // We also need this second version that holds the write state from whatever header/sector is in dataBufferPending
+    // It needs to be static so that it persists between calls in the event that we stick a sector in dataBufferPending and then come back later to write it out
+    static WriteState writeStatePending = PROLOGUE;
 
     // Get the current and previous times in CPU cycles so that we can measure the time between edges on WRD
     uint32_t currTime = 0;
@@ -299,7 +468,10 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
     // We also need a firstTime variable to know when we see the first edge on WRD so that we can start measuring time between edges
     bool firstTime = true;
     
-    uint32_t gpioData = 0; // This will hold the current state of the GPIO input register so that we can check the WRD and WRQ lines
+    // This will hold the current state of the GPIO input register so that we can check the WRD and WRQ lines
+    uint32_t gpioData = 0;
+    // We need a gpioDataPending for the same reason we need a writeStatePending; the HDS bit from it is the side number for dataBufferPending in certain circumstances
+    static uint32_t gpioDataPending = 0;
     bool prevWRD = REG_READ(GPIO_IN_REG) & (1 << WRD); // This will hold the previous state of WRD so that we can detect edges
     bool currWRD = prevWRD; // And the current state
 
@@ -310,91 +482,123 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
     // This is the big buffer that we copy the data into once we've seen the prologue and know that we're in a data or header write
     // It's 704 bytes long so that it can hold sector_again, the 699 bytes of data, and the 4-byte checksum
     uint8_t dataBuffer[704];
+    
+    // Here's another data buffer that we can stick the write data into if we've accumulated a full header/sector, but the SD card task hasn't finished loading the track yet
+    // We can just stick the data in here until the SD card task is finished, and then copy it into the track buffer when it's ready
+    static uint8_t dataBufferPending[704];
 
     // This flag is set if the last thing we received (on the last call to receiveSector) was a header; it's used to determine where to get the side number and interleave from
     static bool lastWriteWasHeader = false;
     static uint32_t prevSideNum = 0; // This is the side number from the last header
     static uint32_t prevFormat = 0; // And the format byte
 
-    // Now we need to sync with the prologue and then do the actual data/header read
-    while (1) {
-        // As mentioned earlier, a 1 is represented by an edge on WRD, and a 0 is represented by the absence of an edge
-        // The easiest way to detect edges is to start a timer when we see the first edge, and then constantly poll for edges on WRD
-        // When we see the next edge, we check the time since the last edge and figure out what multiple of 2us it is (with some tolerance)
-        // If it's just 2us, then we shift in a 1; if it's 4us, then we shift in a 01; if it's 6us, then we shift in a 001
-        // The problem with this strategy is that 0 bits will only be committed when we see the next edge, so if the data ends with a 0, we won't see it
-        // But this is fine because the end of the data is always the epilogue anyway, so we can just stop once we get through the data itself
-        gpioData = REG_READ(GPIO_IN_REG); // Read the GPIO input register to get the current state of WRD and WRQ
-        if ((gpioData & (1 << WRQ))) {
-            // If WRQ goes high, then the Lisa has stopped writing and we can just return
-            // This either means that the Lisa is being stupid and never sent all the data, or that we missed it
-            return;
-        }
-        prevWRD = currWRD; // Update the previous WRD state to the current outdated one
-        currWRD = gpioData & (1 << WRD); // And then update the current state of WRD to what it actually is
-        if (currWRD == prevWRD) {
-            continue; // If there was no change in WRD, then just continue to the next iteration of the loop and skip everything below here
-        }
-        // Otherwise, we saw an edge on WRD, so we need to check the time since the last edge to see what bit combination to shift in
-        if (firstTime) {
-            // If it's the first time through the loop, then we don't care about the time since the last edge
-            // So just shift in a 1 bit and mark that we've seen the first edge
-            rawInputData = (rawInputData << 1) | 1;
-            prevTime = esp_cpu_get_cycle_count(); // Set prevTime to now so that we can measure the time to the next edge
-            // Go process that data based on the current writeState to see if we've received the prologue or the full header/data yet
-            // We pass true for the newReception parameter so that processRawWriteData knows to reset its bit and byte counters
-            processRawWriteData(rawInputData, dataBuffer, writeState, true); 
-            firstTime = false; // And mark that we've seen the first edge
-        } else {
-            // Otherwise, we need to check the time since the last edge
-            currTime = esp_cpu_get_cycle_count(); // Get the current time in CPU cycles
-            if (currTime - prevTime < BIT_TIME_1) {
-                // If the time since the last edge is less than our 2us with some tolerance, then shift in a 1 bit
-                rawInputData = (rawInputData << 1) | 1;
-                prevTime = currTime; // And update prevTime to now so that we can measure the time to the next edge
-                // Then go interpret the data based on the current writeState
-                if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
-                    break; // If processRawWriteData returns true, then we've received the full header/data and can go deal with it
-                }          
-            } else if (currTime - prevTime < BIT_TIME_01) {
-                // Same for 4us; shift in a 01
-                // We have to do this in 2 steps (shift in the 0, then the 1) so that we can call processRawWriteData after each bit
-                rawInputData = (rawInputData << 1);
-                if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
-                    break;
-                }
-                rawInputData = (rawInputData << 1) | 1;
-                if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
-                    break;
-                }
-                prevTime = currTime;
-            } else if (currTime - prevTime < BIT_TIME_001) {
-                // And 6us; shift in a 001
-                // As before, we have to do this in steps; 3 steps this time
-                rawInputData = (rawInputData << 1);
-                if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
-                    break;
-                }
-                rawInputData = (rawInputData << 1);
-                if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
-                    break;
-                }
-                rawInputData = (rawInputData << 1) | 1;
-                if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
-                    break;
-                }
-                prevTime = currTime;
-            } else {
-                // Something weird happened if we end up here; there should never be a gap of more than 6us between edges
-                // This points to data corruption, so there's no point in continuing to receive data
-                // Just return and let the Lisa retry the write if it feels like it
-                lastWriteWasHeader = false; // Make sure to reset this so that we don't try to use a header that's stale
-                interrupts();
-                Serial.println("MORE THAN 6US");
-                noInterrupts();
+    // Skip all of the read logic here if we already have a full header/sector in the pending buffer that we need to write out
+    if (!writeBufferPending) {
+        // Now we need to sync with the prologue and then do the actual data/header read
+        while (1) {
+            // As mentioned earlier, a 1 is represented by an edge on WRD, and a 0 is represented by the absence of an edge
+            // The easiest way to detect edges is to start a timer when we see the first edge, and then constantly poll for edges on WRD
+            // When we see the next edge, we check the time since the last edge and figure out what multiple of 2us it is (with some tolerance)
+            // If it's just 2us, then we shift in a 1; if it's 4us, then we shift in a 01; if it's 6us, then we shift in a 001
+            // The problem with this strategy is that 0 bits will only be committed when we see the next edge, so if the data ends with a 0, we won't see it
+            // But this is fine because the end of the data is always the epilogue anyway, so we can just stop once we get through the data itself
+            gpioData = REG_READ(GPIO_IN_REG); // Read the GPIO input register to get the current state of WRD and WRQ
+            if ((gpioData & (1 << WRQ))) {
+                // If WRQ goes high, then the Lisa has stopped writing and we can just return
+                // This either means that the Lisa is being stupid and never sent all the data, or that we missed it
                 return;
             }
+            prevWRD = currWRD; // Update the previous WRD state to the current outdated one
+            currWRD = gpioData & (1 << WRD); // And then update the current state of WRD to what it actually is
+            if (currWRD == prevWRD) {
+                continue; // If there was no change in WRD, then just continue to the next iteration of the loop and skip everything below here
+            }
+            // Otherwise, we saw an edge on WRD, so we need to check the time since the last edge to see what bit combination to shift in
+            if (firstTime) {
+                // If it's the first time through the loop, then we don't care about the time since the last edge
+                // So just shift in a 1 bit and mark that we've seen the first edge
+                rawInputData = (rawInputData << 1) | 1;
+                prevTime = esp_cpu_get_cycle_count(); // Set prevTime to now so that we can measure the time to the next edge
+                // Go process that data based on the current writeState to see if we've received the prologue or the full header/data yet
+                // We pass true for the newReception parameter so that processRawWriteData knows to reset its bit and byte counters
+                processRawWriteData(rawInputData, dataBuffer, writeState, true); 
+                firstTime = false; // And mark that we've seen the first edge
+            } else {
+                // Otherwise, we need to check the time since the last edge
+                currTime = esp_cpu_get_cycle_count(); // Get the current time in CPU cycles
+                if (currTime - prevTime < BIT_TIME_1) {
+                    // If the time since the last edge is less than our 2us with some tolerance, then shift in a 1 bit
+                    rawInputData = (rawInputData << 1) | 1;
+                    prevTime = currTime; // And update prevTime to now so that we can measure the time to the next edge
+                    // Then go interpret the data based on the current writeState
+                    if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
+                        break; // If processRawWriteData returns true, then we've received the full header/data and can go deal with it
+                    }          
+                } else if (currTime - prevTime < BIT_TIME_01) {
+                    // Same for 4us; shift in a 01
+                    // We have to do this in 2 steps (shift in the 0, then the 1) so that we can call processRawWriteData after each bit
+                    rawInputData = (rawInputData << 1);
+                    if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
+                        break;
+                    }
+                    rawInputData = (rawInputData << 1) | 1;
+                    if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
+                        break;
+                    }
+                    prevTime = currTime;
+                } else if (currTime - prevTime < BIT_TIME_001) {
+                    // And 6us; shift in a 001
+                    // As before, we have to do this in steps; 3 steps this time
+                    rawInputData = (rawInputData << 1);
+                    if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
+                        break;
+                    }
+                    rawInputData = (rawInputData << 1);
+                    if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
+                        break;
+                    }
+                    rawInputData = (rawInputData << 1) | 1;
+                    if (processRawWriteData(rawInputData, dataBuffer, writeState, false)) {
+                        break;
+                    }
+                    prevTime = currTime;
+                } else {
+                    // Something weird happened if we end up here; there should never be a gap of more than 6us between edges
+                    // This points to data corruption, so there's no point in continuing to receive data
+                    // Just return and let the Lisa retry the write if it feels like it
+                    lastWriteWasHeader = false; // Make sure to reset this so that we don't try to use a header that's stale
+                    interrupts();
+                    Serial.println("MORE THAN 6US");
+                    noInterrupts();
+                    return;
+                }
+            }
         }
+    } else {
+        // A reminder: That entire while loop gets skipped if we already have a full pending buffer that needs to get written out
+        // We end up here in that case, where we need to double-check that it's safe to write to trackBufferGCR
+        if (!sdTaskInterface.finished) {
+            // If the task is still busy, then we just need to return again
+            return;
+        } else {
+            // Otherwise, it's safe to proceed and write the pending buffer to trackBufferGCR
+            memcpy(dataBuffer, dataBufferPending, 704); // So copy it back into the main buffer again
+            writeBufferPending = false; // And mark that we no longer have a pending buffer
+            // And also restore writeState and gpioData
+            writeState = writeStatePending;
+            gpioData = gpioDataPending;
+        }
+    }
+
+    // Next, we need to check to see if the SD card task is busy reading in a track; if so, then we can't touch trackBufferGCR
+    if (!sdTaskInterface.finished) {
+        // If the SD card task is busy, then we need to copy the data into dataBufferPending and set writeBufferPending to true
+        memcpy(dataBufferPending, dataBuffer, 704);
+        writeBufferPending = true;
+        // Don't forget to also save the current writeState and gpioData
+        writeStatePending = writeState;
+        gpioDataPending = gpioData;
+        return; // And then return so that we don't touch trackBufferGCR whatsoever; the loop can call us again once the task is done
     }
 
     // Now that we have all of our header data or data data, we need write it to the proper GcrSector in trackBufferGCR
@@ -525,87 +729,32 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
     }
 }
 
-void updateOLED () {
-    OLED.clearDisplay();
-    //OLED.setTextSize(1);
-    //OLED.setTextColor(SH110X_WHITE);
-    OLED.setCursor(0, 0);
-    OLED.print("Track: "); OLED.println(currentTrack);
-    //OLED.print("Motor: "); OLED.println(motorOn ? "ON" : "OFF");
-    //OLED.print("Image Type: "); OLED.println(diskMetadata.imageType == DC42 ? "DC42" : "RAW");
-    //OLED.print("Drive Type: "); OLED.println(diskMetadata.driveType == Drive400 ? "400K" : "800K");
-    //OLED.print("Disk in Place: "); OLED.println(diskMetadata.diskInserted ? "YES" : "NO");
-    //OLED.print("Eject Pending: "); OLED.println(ejectPending ? "YES" : "NO");
-    OLED.display();
-}
-
 
 void setup() {
     init(); // Init the ESP32 Arduino core
-    Serial.begin(115200); // Start serial comms for debugging
-    Serial.println("Starting ESFloppy...");
     initLEDC(RDA); // Initialize the LEDC peripheral on the RDA pin for sending TACH pulses
     setDuty(128); // Set the LEDC duty cycle to 50%
     enableLEDCOutput(true); // And enable its output (note that this doesn't actually connect it to the pin though)
     initPins(); // Set all of ESFloppy's pins to the correct direction and state
-    SD_SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); // Start comms with the SD card using our hardware SPI instance
-    // Now initialize the OLED
-    Wire.begin(OLED_SDA, OLED_SCL); // Start the I2C bus for the OLED
-    OLED.begin(0x3C, true); // And init it
-    // Clear the display since there might be garbage on it after reset
-    OLED.clearDisplay();
-    OLED.display();
-    // And now move onto the SD card
-    if (!SDCard.begin(SD_CONFIG)) { // Initialize the SD card with our hardware SPI instance
-        Serial.println("SD card initialization failed! Halting..."); // And print an error/go into an infinite loop on failure
-        OLED.clearDisplay();
-        OLED.setTextSize(2);
-        OLED.setTextColor(SH110X_WHITE);
-        OLED.setCursor(0, 0);
-        OLED.print("SD Init Failed!");
-        OLED.display();
-        while(1);
-    }
-    card = SDCard.card(); // Now that the card is initialized, store a pointer to its object
-    rootDir.open("/"); // Then open the card's root directory
-    //My Lisa Stuff/MWP/MW_1.018_Install.img
-    //test_image.dc42
-    //My Lisa Stuff/LOS 3 Debozoed/LisaCalc.dc42
-    //My Lisa Stuff/MacWorks Plus II Install.image
-    //LisaTest 3.0 1.image
-    if (!openImage("copy_image_400k.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
-        Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
-        OLED.clearDisplay();
-        OLED.setTextSize(2);
-        OLED.setTextColor(SH110X_WHITE);
-        OLED.setCursor(0, 0);
-        OLED.print("Can't Open Disk!");
-        OLED.display();
-        while(1); // If we fail to open the image, just hang here
-    }
-    // Read and encode track 0 so that we can start sending it out when the Lisa requests it
-    readTrack(0, &disk, trackBufferDecoded, &diskMetadata);
-    encodeTrackToGCR(0, trackBufferDecoded, trackBufferGCR, &diskMetadata);
-    // For testing purposes, let's modify sector 0's data a bit
-    // Invert all 524 bytes of all the sectors on both sides of track 0
-    /*for (int side = 0; side < 2; side++) {
-        for (int sector = 0; sector < sectorsPerTrack[0]; sector++) {
-            for (int i = 0; i < 524; i++) {
-                trackBufferDecoded[side][sector].data[i] = ~trackBufferDecoded[side][sector].data[i];
-            }
-        }
-    }*/
-    //writeTrack(0, &disk, trackBufferDecoded, &diskMetadata); // Write the modified track back to the disk image
-    //closeImage(&disk, &diskMetadata); // Close the image
-    OLED.setTextSize(1);
-    OLED.setTextColor(SH110X_WHITE);
-    for(int i = 0; i < 80; i++) {
-        setFreq(tachPulsesPerTrackLisa[i], 8);
-    }
-    //updateOLED(); // Update the OLED with the current status
-    Serial.println("ESFloppy is ready!"); // If all this succeeds, print a ready message
+
+    // Now we need to create a task to handle SD card ops, the OLED, and serial comms on the other core
+    // This way, the main core can focus solely on the time-critical task of sending data to the Lisa
+    // Now that I think about it, we're basically doing what Floppy Emu does, with our main core being the CPLD and our SD core being the AVR
+    xTaskCreatePinnedToCore(
+        sdCardTask, // The function to run on the other core
+        "sdCardTask", // A name for the task, it doesn't really matter
+        8192, // The stack size for the task in bytes
+        NULL, // No parameters to pass to it
+        1, // Give it a priority of 1, same as the main core loop task
+        NULL, // Don't return a handle to the task since we don't need it
+        xPortGetCoreID() == 0 ? 1 : 0 // Put the task on whichever core we're not currently running on
+    );
+
+    while(!sdTaskInterface.initDone); // Wait for the SD card task to finish initializing before we continue
+
     // Just like ESProFile, we need to disable the interrupt watchdog timer
     // For the sake of speed, we have to disable interrupts throughout our entire program, and the watchdog would trigger and break everything
+    // Note that this ONLY disables things on this core; the other core is still free to use interrupts all it wants
     REG_WRITE(TIMG1_WDT_WE_REG, TIMG1_WDT_WE); // Enable writing to the watchdog timer registers
     REG_CLR_BIT(TIMG1_WDT_CONF_REG, TIMG1_WDT_EN); // And clear the timer's enable bit to disable it
     delay(100); // Wait a little bit to let the Serial.println finish before we actually kill interrupts
@@ -629,10 +778,25 @@ void loop() {
 
     if ((gpioIn & (1 << DR1)) == 0) { // If the drive is enabled, then we need to check for commands
 
+        static bool prevWRQ = true;
+        static uint32_t lostSectorCount = 0;
+        bool currWRQ = (gpioIn & (1 << WRQ)) != 0;
+        if (!currWRQ && prevWRQ && writeBufferPending) {
+            lostSectorCount++;
+            dbg(2, lostSectorCount);
+        }
+        prevWRQ = currWRQ; // must run before the early returns below
+
         // If WRQ is low, then the Lisa is trying to write to the drive, so go and handle that
         if ((gpioIn & (1 << WRQ)) == 0) {
             receiveSector();
             return; // This makes sure that we refresh gpioIn with an updated read after we get back from receiveSector
+        }
+
+        // If we have a pending write buffer and the SD card task is finished, then call receiveSector again to write the pending buffer to trackBufferGCR
+        if (writeBufferPending && sdTaskInterface.finished) {
+            receiveSector();
+            return;
         }
             
         currLSTRB = (gpioIn & (1 << PH3)) ? 1 : 0; // Read the current state of LSTRB (PH3)
@@ -695,7 +859,10 @@ void loop() {
                     break;
                 case 12:
                 case 13: // SIDES register (duplicated on both addresses 12 and 13); returns 0 for 400K drives, 1 for 800K drives
-                    writeRDA(diskMetadata.driveType == Drive800 ? 1 : 0);
+                    // Always return 1; I previously based it on the image size, but then discovered that certain programs cache the value
+                    // So if you switch images, the program will still assume it's the same drive type as before and things break
+                    writeRDA(true);
+                    //writeRDA(diskMetadata.driveType == Drive800 ? 1 : 0);
                     break;
                 case 14:
                 case 15: // /DRVIN register (duplicated on both addresses 14 and 15); hard-coded to 0 as a way for the host to detect a drive connected
@@ -720,16 +887,14 @@ void loop() {
                     if (regData == 0 && stepComplete == true) { // If the host is trying to step the heads and we're not already in the middle of a step
                         stepComplete = false; // Mark that a step is in progress
                         writeRDA(stepComplete); // And set the STEP register low to indicate that we're busy stepping
+                        uint32_t waitStart = esp_cpu_get_cycle_count();
+                        while(!sdTaskInterface.finished); // Wait for the SD card task to finish its current command before we dispatch it again
+                        dbg(3, (esp_cpu_get_cycle_count() - waitStart) / 240);   // µs
                         trackChanged = true; // Mark that the track has changed so we can reset the sector back to 0 in transmitTrack
-                        // Before we step, check the dirty bit to see if the current track was modified
-                        if (dirty == true) {
-                            // If so, write the current track back to the disk image before we seek away
-                            decodeTrackFromGCR(currentTrack, trackBufferGCR, trackBufferDecoded, &diskMetadata);
-                            interrupts();
-                            writeTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata);
-                            noInterrupts();
-                            dirty = false; // And clear the dirty bit
-                        }
+                        // We need to dispatch the SD card task on the other core to save the current track (if necessary) and load the next one
+                        sdTaskInterface.writeTrack = currentTrack; // We want it to write out the current (pre-step) track
+                        sdTaskInterface.command = dirty ? WRITE_READ_TRACK : READ_TRACK; // If the track is dirty, then we need to write it out first, otherwise we can just read in the new track
+
                         // Now we can actually perform the step
                         if (stepDirection == IN) { // If stepping IN, increment the track
                             if (currentTrack < 79) {
@@ -741,21 +906,22 @@ void loop() {
                                 currentTrack--;
                             }
                         }
-                        // Now that we've updated the track number, we need to read in all the sectors for this new track from the disk image
-                        //interrupts();
-                        readTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata);
-                        //noInterrupts();
-                        encodeTrackToGCR(currentTrack, trackBufferDecoded, trackBufferGCR, &diskMetadata);
-                        //updateOLED(); // Update the OLED with the current status
-                        interrupts();
-                        Serial.println(currentTrack);
-                        noInterrupts();
-                        stepComplete = true; // Once they're read in, mark that the step is complete
+
+                        // currentTrack is now the new track that we want to read in, so set readTrack accordingly
+                        sdTaskInterface.readTrack = currentTrack;
+                        dirty = false; // Clear the dirty bit since the task already knows about it now
+                        sdTaskInterface.finished = false; // And mark that the task isn't finished yet
+                        // Now we need to synchronize to make sure that everything above here is truly done before we proceed
+                        // We can't afford to have the compiler reorder anything because then us and the SD task might try to access the same memory at the same time
+                        __sync_synchronize();
+                        // Now that we're synced, start the task
+                        sdTaskInterface.start = true;
+                        dbg(0, currentTrack);
+                        stepComplete = true; // Now that we've dispatched the other core's task, mark the step as complete
                     }
                     break;
                 case 4: // /MOTORON register (low to turn motor on, high to turn motor off)
                     motorOn = (regData == 0);
-                    //updateOLED(); // Update the OLED with the current status
                     // Turn on the activity LED whenever the motor is on too
                     if (motorOn) {
                         REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED);
@@ -763,10 +929,15 @@ void loop() {
                     else {
                         REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
                         // If the motor just turned off, this is a prime opportunity to write the current track to the image if necessary
-                        if (dirty == true) {
-                            decodeTrackFromGCR(currentTrack, trackBufferGCR, trackBufferDecoded, &diskMetadata); // So decode it
-                            writeTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata); // Write it out
-                            dirty = false; // And clear the dirty bit
+                        // This works basically the same as in the step case above, except that we don't need to change the track number since we're not stepping
+                        if (dirty == true && sdTaskInterface.finished) {
+                            sdTaskInterface.writeTrack = currentTrack;
+                            sdTaskInterface.command = WRITE_READ_TRACK;
+                            sdTaskInterface.readTrack = currentTrack;
+                            dirty = false;
+                            sdTaskInterface.finished = false;
+                            __sync_synchronize();
+                            sdTaskInterface.start = true;
                         }
                     }
                     break;
@@ -777,25 +948,34 @@ void loop() {
                     if (regData == 1 && ejectPending == false) {
                         ejectPending = true; // If so, mark that an eject is pending
                         ejectStartTime = millis(); // And record the start time
-                        //updateOLED(); // Update the OLED with the current status
                     }
                     else if (regData == 0) { // If the host writes a 0, we need to cancel any pending eject
                         ejectPending = false;
-                        //updateOLED(); // Update the OLED with the current status
                     }
                     else if (ejectPending == true) { // Otherwise, if an eject is pending, check if 500ms has passed
                         if (millis() - ejectStartTime >= 500) {
                             // If so, eject the disk
-                            // First make sure that any pending writes are flushed to the image
+                            // First make sure that any pending writes are flushed to the image; dispatch the SD task the same way as usual
                             if (dirty == true) {
-                                decodeTrackFromGCR(currentTrack, trackBufferGCR, trackBufferDecoded, &diskMetadata); // Decode the current track
-                                writeTrack(currentTrack, &disk, trackBufferDecoded, &diskMetadata); // Write it out
-                                dirty = false; // And clear the dirty bit
+                                // Wait until the SD card task is finished with its current command before we dispatch it again
+                                // It's okay to block like this in the eject handler because we're ejecting the disk anyway
+                                while (sdTaskInterface.finished == false);
+                                sdTaskInterface.writeTrack = currentTrack;
+                                sdTaskInterface.command = WRITE_READ_TRACK;
+                                sdTaskInterface.readTrack = currentTrack;
+                                dirty = false;
+                                sdTaskInterface.finished = false;
+                                __sync_synchronize();
+                                sdTaskInterface.start = true;
                             }
-                            closeImage(&disk, &diskMetadata); // Close the disk image file
+                            // Wait until the SD card task is done with its current command
+                            while (sdTaskInterface.finished == false);
+                            sdTaskInterface.command = CLOSE_IMAGE; // Now tell it to close the image
+                            sdTaskInterface.finished = false;
+                            __sync_synchronize();
+                            sdTaskInterface.start = true; // And start the task
                             motorOn = false; // Turn off the motor too
                             ejectPending = false;
-                            //updateOLED(); // Update the OLED with the current status
                         }
                     }
                     break;
