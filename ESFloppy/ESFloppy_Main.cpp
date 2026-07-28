@@ -211,7 +211,11 @@ void sdCardTask(void* parameter) {
         OLED.setCursor(0, 0);
         OLED.print("SD Init Failed!");
         OLED.display();
-        while(1);
+        while(1) {
+            // If we fail to init the SD card, then spin forever
+            // Make sure to call vTaskDelay instead of just a plain while(1) loop so that the watchdog doesn't reset the ESP32
+            vTaskDelay(1);
+        }
     }
     card = SDCard.card(); // Now that the card is initialized, store a pointer to its object
     rootDir.open("/"); // Then open the card's root directory
@@ -220,7 +224,8 @@ void sdCardTask(void* parameter) {
     //My Lisa Stuff/LOS 3 Debozoed/LisaCalc.dc42
     //My Lisa Stuff/MacWorks Plus II Install.image
     //LisaTest 3.0 1.image
-    if (!openImage("copy_image_800k.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
+    //copy_image_800k.dc42
+    if (!openImage("copy_image_400k.dc42", &disk, &diskMetadata)) { // And try opening a disk image file
         Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
         OLED.clearDisplay();
         OLED.setTextSize(2);
@@ -228,7 +233,10 @@ void sdCardTask(void* parameter) {
         OLED.setCursor(0, 0);
         OLED.print("Can't Open Disk!");
         OLED.display();
-        while(1); // If we fail to open the image, just hang here
+        while(1) {
+            // If we fail to open the disk image, then spin forever
+            vTaskDelay(1);
+        }
     }
     // Read and encode track 0 so that we can start sending it out when the Lisa requests it
     readTrack(0, &disk, trackBufferDecoded, &diskMetadata);
@@ -910,10 +918,7 @@ void loop() {
                     break;
                 case 12:
                 case 13: // SIDES register (duplicated on both addresses 12 and 13); returns 0 for 400K drives, 1 for 800K drives
-                    // Always return 1; I previously based it on the image size, but then discovered that certain programs cache the value
-                    // So if you switch images, the program will still assume it's the same drive type as before and things break
-                    writeRDA(true);
-                    //writeRDA(diskMetadata.driveType == Drive800 ? 1 : 0);
+                    writeRDA(diskMetadata.driveType == Drive800 ? 1 : 0);
                     break;
                 case 14:
                 case 15: // /DRVIN register (duplicated on both addresses 14 and 15); hard-coded to 0 as a way for the host to detect a drive connected
