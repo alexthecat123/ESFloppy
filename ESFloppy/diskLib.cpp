@@ -10,10 +10,14 @@
 static uint8_t rawDataBuffer[12800];
 static uint8_t rawTagBuffer[1024];
 
+static uint32_t lastReadTrack = 0xFFFFFFFF; // The last track we read from the image; used to avoid unnecessary reads in writeTrack()
+
 extern SdCard* card; // A pointer to the SdFat card object from ESFloppy_Main.cpp, so we can use it in this file
 
 // Calculates and returns the data checksum for a DC42 image
 __attribute__((optimize("Ofast"))) uint32_t calcDataChecksum(File32* disk, DiskImageMetadata* metadata) {
+    // calcDataChecksum clobbers the rawDataBuffer, so set lastReadTrack to an invalid value so that writeTrack() will read the data sectors again
+    lastReadTrack = 0xFFFFFFFF;
     // The checksum algorithm is pretty darn simple: start with a 32-bit accumulator at 0
     // Then add each 16-bit BIG ENDIAN!!!! word of the data to the accumulator
     // And then rotate the accumulator right by 1 bit
@@ -46,6 +50,8 @@ __attribute__((optimize("Ofast"))) uint32_t calcDataChecksum(File32* disk, DiskI
 
 // Calculates and returns the tag checksum for a DC42 image
 __attribute__((optimize("Ofast"))) uint32_t calcTagChecksum(File32* disk, DiskImageMetadata* metadata) {
+    // calcTagChecksum clobbers the rawTagBuffer, so set lastReadTrack to an invalid value so that writeTrack() will read the tag sectors again
+    lastReadTrack = 0xFFFFFFFF;
     // The tag checksum is the same, just we iterate over the tag data instead of the regular data
     // And apparently there was a bug in the original DC42 implementation where the first 12 tag bytes were skipped in the checksum
     // For the sake of compatibility, that convention has been preserved ever since, and so we'll do it here too
@@ -78,6 +84,8 @@ __attribute__((optimize("Ofast"))) uint32_t calcTagChecksum(File32* disk, DiskIm
 // This function opens a disk image file and determines its type (raw or DC42)
 // If there are any errors, it returns false; otherwise, it returns true
 bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
+    // openImage clobbers the rawDataBuffer, so set lastReadTrack to an invalid value so that writeTrack() will read the data sectors again
+    lastReadTrack = 0xFFFFFFFF;
     if(!disk->open(filename, O_RDWR)){ // Try opening the specified disk image file
         Serial.printf("Failed to open image file %s!\n", filename);
         disk->close();
@@ -322,6 +330,7 @@ __attribute__((optimize("Ofast"))) void readTrack(uint8_t track, File32* disk, D
             }
         }
     }
+    lastReadTrack = track; // Remember the last track we read so that writeTrack() can avoid unnecessary reads
 }
 
 // Writes an entire track (both sides if 800K disk) from a DecodedSector array back into the disk image
@@ -369,14 +378,25 @@ __attribute__((optimize("Ofast"))) void writeTrack(uint8_t track, File32* disk, 
         // This is thanks to the dc42 header in the case of the data, and the header combined with the tags only being 12 bytes each in the case of the tags
         // What this means is that we can't just overwrite a whole SD card sector with our new data because that would clobber the data from other tracks that's partially in that sector
         // So read those sectors in first, and then the copy loop below only overwrites the parts that belong to this track
-        card->readSectors(dataSectorNumber, rawDataBuffer, dataSectorCount);
+
+        // The good news though is that this read isn't really necessary most of the time, since we always read in the current track before writing it back out
+        // Which means that the rawDataBuffer already contains the correct data for the sectors that aren't being overwritten
+        // This assumption holds as long as readTrack is always called before writeTrack, which it is in the current implementation
+        // So we'll just put a check around this readSectors call to make sure that the track that was read is the same track that's being written
+        // Which is currently always the case, and will skip BOTH of these readSectors calls, saving lots of time
+        if (lastReadTrack != track) {
+            card->readSectors(dataSectorNumber, rawDataBuffer, dataSectorCount);
+        }
         // Now do exactly the same thing for the tags if the image has them
         if (metadata->tagsPresent) {
             writeOffset = sizeof(DC42Header) + (DATA_SIZE_400K * sides) + (totalSectorsBeforeTrack * 12);
             tagSkew = writeOffset & 511;
             tagSectorNumber = metadata->startAddress + (writeOffset >> 9);
             tagSectorCount = (tagSkew + (sectorsInTrack * sides * 12) + 511) >> 9;
-            card->readSectors(tagSectorNumber, rawTagBuffer, tagSectorCount);
+            // Same as above, we only need to read the tags if the last read track is not the same as the current track
+            if (lastReadTrack != track) {
+                card->readSectors(tagSectorNumber, rawTagBuffer, tagSectorCount);
+            }
         }
     }
 
@@ -426,6 +446,8 @@ __attribute__((optimize("Ofast"))) void writeTrack(uint8_t track, File32* disk, 
 
 // Closes the disk image file, making sure to update the DC42 header if needed/applicable
 void closeImage(File32* disk, DiskImageMetadata* metadata) {
+    // closeImage clobbers the rawDataBuffer, so set lastReadTrack to an invalid value so that writeTrack() will read the data sectors again
+    lastReadTrack = 0xFFFFFFFF;
     // If it's a DC42 image, we need to update the header before closing
     if (metadata->imageType == DC42) {
         // All we need to do here is update the data and tag checksums in the DC42 header

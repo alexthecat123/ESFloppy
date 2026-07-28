@@ -131,8 +131,19 @@ struct SdTaskInterface {
 // Make an SdTaskInterface struct; make sure it's static and volatile since it's shared between two cores
 static volatile SdTaskInterface sdTaskInterface = {0, 0, READ_TRACK, false, true, false};
 
-// This is set if we have a full sector or header in the pending write buffer that we need to write out once the SD task is done reading in the track
-bool writeBufferPending = false;
+// The index of the next free slot in sectorStash that we can use to store a sector
+uint32_t stashCount = 0;
+
+// This struct is used to store a sector that we've received from the Lisa, but that we can't write to the track buffer yet because it's in use by the SD task
+struct SectorStashEntry {
+    WriteState state; // The state of the sector (whether it's a header or data)
+    uint32_t gpio; // The state of the GPIO pins when we got the sector; used to determine the side number from HDS in certain cases
+    uint8_t data[704]; // The actual sector data itself
+};
+
+uint32_t pendingWriteTrack = 0; // The track that we want to write out to the disk image on the SD card (if any)
+SdTaskCommand pendingCommand = READ_TRACK; // The command that we want to send to the SD card task
+bool pendingDispatch = false; // Whether or not we have a pending command to send to the SD card task
 
 
 void updateOLED () {
@@ -251,7 +262,9 @@ void sdCardTask(void* parameter) {
         // Things are pretty easy from here on; first check if we need to write a track, and if so, do it
         if (sdTaskInterface.command == WRITE_READ_TRACK) {
             decodeTrackFromGCR(sdTaskInterface.writeTrack, trackBufferGCR, trackBufferDecoded, &diskMetadata);
+            uint32_t startTime = micros();
             writeTrack(sdTaskInterface.writeTrack, &disk, trackBufferDecoded, &diskMetadata);
+            dbg(253, micros() - startTime);
         }
         if (sdTaskInterface.command == READ_TRACK || sdTaskInterface.command == WRITE_READ_TRACK) {
             // If the command is either a read OR write, then we now need to read the requested track and encode it to GCR
@@ -351,8 +364,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack() {
         // The Lisa won't care; it'll just think that the disk hasn't spun around to the next sector yet and will patiently wait for us
         static const uint8_t syncPattern[5] = {0xFF, 0x3F, 0xCF, 0xF3, 0xFC};
         uint8_t currentByte;
-        if (sdTaskInterface.finished) {
-            // If the SD task is finished, then we can sedn out the next bit from the track buffer
+        if (sdTaskInterface.finished && !pendingDispatch) {
+            // If the SD task is finished AND we're not waiting for a pending dispatch (meaning that trackBufferGCR is up to date), then we can sedn out the next bit from the track buffer
             currentByte = ((uint8_t*)&trackBufferGCR[side][currentSector])[inSectorIndex >> 3]; // Get the byte that contains the bit we want
         } else {
             // If the SD task is not finished, then we need to send out the sync pattern
@@ -451,8 +464,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
         // 7. WRQ goes low again, and we get a standard data write as described above to clear out the data portion of the sector
         // So we can really just handle the header and data portions of things separately, and don't care that the data is tied to a format at all
 
-    // Anyway, time to get started on all of that; first, just put RDA in a defined 0 state so that we're not sending garbage during a write
-    writeRDA(false);
+    // Anyway, time to get started on all of that
 
     // This holds what state of the write op we're in; we start in PROLOGUE since the first thing we do is hunt for the prologue
     // We never modify this directly; we pass it to processRawWriteData, which updates it as needed
@@ -484,16 +496,28 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
     uint8_t dataBuffer[704];
     
     // Here's another data buffer that we can stick the write data into if we've accumulated a full header/sector, but the SD card task hasn't finished loading the track yet
-    // We can just stick the data in here until the SD card task is finished, and then copy it into the track buffer when it's ready
-    static uint8_t dataBufferPending[704];
+    // We can stick up to 16 sectors in here until the SD card task is finished, and then copy them into the track buffer when it's ready
+    static SectorStashEntry sectorStash[16];
+
+    // The stash needs to be a FIFO to make sure that we write the sectors in the order that they were received to make sure that lastWriteWasHeader works
+    // So we need static head and tail indices for it
+    static uint32_t stashHead = 0;
+    static uint32_t stashTail = 0;
 
     // This flag is set if the last thing we received (on the last call to receiveSector) was a header; it's used to determine where to get the side number and interleave from
     static bool lastWriteWasHeader = false;
     static uint32_t prevSideNum = 0; // This is the side number from the last header
     static uint32_t prevFormat = 0; // And the format byte
 
-    // Skip all of the read logic here if we already have a full header/sector in the pending buffer that we need to write out
-    if (!writeBufferPending) {
+    static uint32_t lostSectorCount = 0; // The number of sectors that we've lost because the stash overflowed
+
+    gpioData = REG_READ(GPIO_IN_REG); // Read the GPIO input register to get the current state of WRD and WRQ
+
+    // Skip all of the read logic here if WRQ is high, meaning that the Lisa isn't writing to us anymore
+    // If we're here and WRQ is high, then it means that we need to write out the stash, so no need to try and read in any sectors
+    if (!(gpioData & (1 << WRQ))) {
+        // First, just put RDA in a defined 0 state so that we're not sending garbage during a write
+        writeRDA(false);
         // Now we need to sync with the prologue and then do the actual data/header read
         while (1) {
             // As mentioned earlier, a 1 is represented by an edge on WRD, and a 0 is represented by the absence of an edge
@@ -574,31 +598,50 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
                 }
             }
         }
+        // Last but not least, we need to write out the data that we've received
+        // If the SD card task is still busy, then we need to stash the data away for later
+        // That second condition of stashCount > 0 might seem a little weird because why would we ever want to stash data if the SD card isn't busy?
+        // Well, it's because data must be written out in the order it's received in order for the lastWriteWasHeader logic to work
+        // So if the stash already has stuff in it, then we need to keep filling it instead of bypassing it to maintain that order
+        if (!sdTaskInterface.finished || stashCount > 0) {
+            if (stashCount >= 16) {
+                // If the stash is full, then we have a problem and need to return without doing anything else
+                lostSectorCount++;
+                dbg(254, lostSectorCount);
+                return;
+            }
+            else if (stashCount > 0) {
+                dbg(255, stashCount);
+            }
+            // Go ahead and copy the data into the stash, remembering that it's a FIFO
+            memcpy(sectorStash[stashHead].data, dataBuffer, 704);
+            sectorStash[stashHead].state = writeState; // Don't forget to copy writeState and gpioData too
+            sectorStash[stashHead].gpio = gpioData;
+            stashCount++; // Increment the stash count to mark that we've added an entry
+            stashHead = (stashHead + 1) % 16; // Move the head to the next position
+            return; // And then return so that we don't touch trackBufferGCR whatsoever; the loop can call us again once the task is done
+        }
     } else {
-        // A reminder: That entire while loop gets skipped if we already have a full pending buffer that needs to get written out
+        // A reminder: That entire while loop gets skipped if we already have a non-empty sectorStash to write out
         // We end up here in that case, where we need to double-check that it's safe to write to trackBufferGCR
         if (!sdTaskInterface.finished) {
             // If the task is still busy, then we just need to return again
             return;
         } else {
-            // Otherwise, it's safe to proceed and write the pending buffer to trackBufferGCR
-            memcpy(dataBuffer, dataBufferPending, 704); // So copy it back into the main buffer again
-            writeBufferPending = false; // And mark that we no longer have a pending buffer
-            // And also restore writeState and gpioData
-            writeState = writeStatePending;
-            gpioData = gpioDataPending;
+            // Otherwise, it's safe to proceed and write the stash to trackBufferGCR
+            // But only if the stash is non-empty; double-check to be safe
+            if (stashCount == 0) {
+                return;
+            }
+            // Copy one stash entry per call to avoid blocking for too long; the loop will call us again to write the next one
+            // Once again, remember that the stash is a FIFO; we need to write out the oldest entry first
+            memcpy(dataBuffer, sectorStash[stashTail].data, 704); // Copy the oldest stash entry into the main data buffer
+            // And also restore writeState and gpioData from the stash entry so that we can write it to the proper GcrSector in trackBufferGCR
+            writeState = sectorStash[stashTail].state;
+            gpioData = sectorStash[stashTail].gpio;
+            stashCount--; // Decrement the stash count to mark that we've written one entry
+            stashTail = (stashTail + 1) % 16; // And move the tail to the next position
         }
-    }
-
-    // Next, we need to check to see if the SD card task is busy reading in a track; if so, then we can't touch trackBufferGCR
-    if (!sdTaskInterface.finished) {
-        // If the SD card task is busy, then we need to copy the data into dataBufferPending and set writeBufferPending to true
-        memcpy(dataBufferPending, dataBuffer, 704);
-        writeBufferPending = true;
-        // Don't forget to also save the current writeState and gpioData
-        writeStatePending = writeState;
-        gpioDataPending = gpioData;
-        return; // And then return so that we don't touch trackBufferGCR whatsoever; the loop can call us again once the task is done
     }
 
     // Now that we have all of our header data or data data, we need write it to the proper GcrSector in trackBufferGCR
@@ -729,6 +772,26 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector() {
     }
 }
 
+uint32_t startTime = 0;
+
+// This function tries to dispatch any pending SD card operations (if there are any) to the SD card task if it's finished with its previous operation
+__attribute__((optimize("Ofast"))) IRAM_ATTR void tryToStartSD() {
+    if (!pendingDispatch || !sdTaskInterface.finished) {
+        return; // If there's nothing to dispatch or the SD card task isn't finished, then just return
+    }
+    dbg(3, micros() - startTime);
+    // Otherwise, start up the SD task with the pending operation
+    sdTaskInterface.writeTrack = pendingWriteTrack; // The track that we need to write back to the disk image
+    sdTaskInterface.readTrack = currentTrack; // Whatever track we ended up on and need to read
+    sdTaskInterface.command = pendingCommand; // Whether there's a track to write in the first place
+    pendingWriteTrack = currentTrack; // Update pendingWriteTrack to wherever we are now for next time
+    sdTaskInterface.finished = false; // We're obviously not finished anymore since we're dispatching a new operation
+    __sync_synchronize(); // Call synchronize to make sure that everything above here is done before we move on
+    sdTaskInterface.start = true; // Start the SD task
+    pendingDispatch = false; // And clear the pendingDispatch flag since we just dispatched it
+    stepComplete = true; // We're finally done with the step now, so mark it as complete
+}
+
 
 void setup() {
     init(); // Init the ESP32 Arduino core
@@ -774,29 +837,17 @@ void loop() {
         // The host sets STEP to 0 to step the heads, but the drive must set it back to 1 again within 12ms. I'm guessing the host polls for this, and since we're planning on writing to the SD card during steps, we need to make sure to only set it back to 1 after the SD card write is finished
         
     // First up, read in the states of all the I/O pins that we care about
-    uint32_t gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register    
+    uint32_t gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register
+
+    // Every loop iteration, try to dispatch any pending SD card ops from previous seeks, if there are any
+    tryToStartSD();
 
     if ((gpioIn & (1 << DR1)) == 0) { // If the drive is enabled, then we need to check for commands
 
-        static bool prevWRQ = true;
-        static uint32_t lostSectorCount = 0;
-        bool currWRQ = (gpioIn & (1 << WRQ)) != 0;
-        if (!currWRQ && prevWRQ && writeBufferPending) {
-            lostSectorCount++;
-            dbg(2, lostSectorCount);
-        }
-        prevWRQ = currWRQ; // must run before the early returns below
-
-        // If WRQ is low, then the Lisa is trying to write to the drive, so go and handle that
-        if ((gpioIn & (1 << WRQ)) == 0) {
+        // If WRQ is low (Lisa is trying to write) or we have stashed sectors to write out, then call receiveSector to handle it
+        if (((gpioIn & (1 << WRQ)) == 0) || stashCount > 0) {
             receiveSector();
             return; // This makes sure that we refresh gpioIn with an updated read after we get back from receiveSector
-        }
-
-        // If we have a pending write buffer and the SD card task is finished, then call receiveSector again to write the pending buffer to trackBufferGCR
-        if (writeBufferPending && sdTaskInterface.finished) {
-            receiveSector();
-            return;
         }
             
         currLSTRB = (gpioIn & (1 << PH3)) ? 1 : 0; // Read the current state of LSTRB (PH3)
@@ -884,18 +935,18 @@ void loop() {
                     stepDirection = regData ? OUT : IN;
                     break;
                 case 2: // /STEP register (host sets low to step heads, drive sets high when step is complete)
-                    if (regData == 0 && stepComplete == true) { // If the host is trying to step the heads and we're not already in the middle of a step
-                        stepComplete = false; // Mark that a step is in progress
-                        writeRDA(stepComplete); // And set the STEP register low to indicate that we're busy stepping
-                        uint32_t waitStart = esp_cpu_get_cycle_count();
-                        while(!sdTaskInterface.finished); // Wait for the SD card task to finish its current command before we dispatch it again
-                        dbg(3, (esp_cpu_get_cycle_count() - waitStart) / 240);   // µs
-                        trackChanged = true; // Mark that the track has changed so we can reset the sector back to 0 in transmitTrack
-                        // We need to dispatch the SD card task on the other core to save the current track (if necessary) and load the next one
-                        sdTaskInterface.writeTrack = currentTrack; // We want it to write out the current (pre-step) track
-                        sdTaskInterface.command = dirty ? WRITE_READ_TRACK : READ_TRACK; // If the track is dirty, then we need to write it out first, otherwise we can just read in the new track
+                    if (regData == 0) { // If the host is trying to step the heads
+                        // We don't necessraily always want to step the heads here; if the SD card task is still busy, then we can't step until it's done
+                        if (!pendingDispatch) {
+                            startTime = micros();
+                            // If a dispatch to the SD task isn't already pending, then we can set up a pending one with the current seek
+                            pendingCommand = dirty ? WRITE_READ_TRACK : READ_TRACK; // If the track is dirty, then we need to write it out first, otherwise we can just read in the new track
+                            // Keep in mind that pendingWriteTrack itself is set in tryToStartSD, so that's why we don't set it here
+                            dirty = false; // Clear the dirty bit since the task already knows about it now
+                            pendingDispatch = true; // Mark that a dispatch is pending so we don't overwrite the pending command with a new one if the host seeks again
+                        }
 
-                        // Now we can actually perform the step
+                        // Now we can actually perform the step; this way, currentTrack keeps up with the actual track but we don't disturb the SD task until it's done
                         if (stepDirection == IN) { // If stepping IN, increment the track
                             if (currentTrack < 79) {
                                 currentTrack++;
@@ -907,17 +958,10 @@ void loop() {
                             }
                         }
 
-                        // currentTrack is now the new track that we want to read in, so set readTrack accordingly
-                        sdTaskInterface.readTrack = currentTrack;
-                        dirty = false; // Clear the dirty bit since the task already knows about it now
-                        sdTaskInterface.finished = false; // And mark that the task isn't finished yet
-                        // Now we need to synchronize to make sure that everything above here is truly done before we proceed
-                        // We can't afford to have the compiler reorder anything because then us and the SD task might try to access the same memory at the same time
-                        __sync_synchronize();
-                        // Now that we're synced, start the task
-                        sdTaskInterface.start = true;
+                        trackChanged = true; // Mark that the track has changed so we can reset the sector back to 0 in transmitTrack
+                        stepComplete = false; // Mark that a step is in progress; it won't be done until the SD card task finishes THIS step
+                        tryToStartSD(); // Try to start the read and/or write for this seek on the SD card task if it isn't busy
                         dbg(0, currentTrack);
-                        stepComplete = true; // Now that we've dispatched the other core's task, mark the step as complete
                     }
                     break;
                 case 4: // /MOTORON register (low to turn motor on, high to turn motor off)
@@ -930,14 +974,12 @@ void loop() {
                         REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
                         // If the motor just turned off, this is a prime opportunity to write the current track to the image if necessary
                         // This works basically the same as in the step case above, except that we don't need to change the track number since we're not stepping
-                        if (dirty == true && sdTaskInterface.finished) {
-                            sdTaskInterface.writeTrack = currentTrack;
-                            sdTaskInterface.command = WRITE_READ_TRACK;
-                            sdTaskInterface.readTrack = currentTrack;
+                        if (dirty == true && !pendingDispatch) {
+                            startTime = micros();
+                            pendingCommand = WRITE_READ_TRACK; // The track is guaranteed dirty here, so always make it a write
                             dirty = false;
-                            sdTaskInterface.finished = false;
-                            __sync_synchronize();
-                            sdTaskInterface.start = true;
+                            pendingDispatch = true;
+                            tryToStartSD();
                         }
                     }
                     break;
@@ -960,7 +1002,7 @@ void loop() {
                                 // Wait until the SD card task is finished with its current command before we dispatch it again
                                 // It's okay to block like this in the eject handler because we're ejecting the disk anyway
                                 while (sdTaskInterface.finished == false);
-                                sdTaskInterface.writeTrack = currentTrack;
+                                sdTaskInterface.writeTrack = pendingWriteTrack;
                                 sdTaskInterface.command = WRITE_READ_TRACK;
                                 sdTaskInterface.readTrack = currentTrack;
                                 dirty = false;
@@ -970,6 +1012,7 @@ void loop() {
                             }
                             // Wait until the SD card task is done with its current command
                             while (sdTaskInterface.finished == false);
+                            pendingDispatch = false; // Clear the pendingDispatch flag since we're about to eject the disk
                             sdTaskInterface.command = CLOSE_IMAGE; // Now tell it to close the image
                             sdTaskInterface.finished = false;
                             __sync_synchronize();
