@@ -11,11 +11,11 @@ __attribute__((optimize("Ofast"))) uint32_t calcTagChecksum(File32* disk, DiskIm
 // If there are any errors, it returns false; otherwise, it returns true
 bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata);
 
-// Reads an entire track (both sides if 800K disk) from the disk image into a DecodedSector array
-__attribute__((optimize("Ofast"))) void readTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskImageMetadata* metadata);
+// Reads an entire track (both sides if 800K or Twiggy disk) from the disk image into a DecodedSector array
+__attribute__((optimize("Ofast"))) void readTrack(uint8_t track, File32* disk, DecodedSector sectors[2][22], DiskImageMetadata* metadata);
 
-// Writes an entire track (both sides if 800K disk) from a DecodedSector array back into the disk image
-__attribute__((optimize("Ofast"))) void writeTrack(uint8_t track, File32* disk, DecodedSector sectors[2][12], DiskImageMetadata* metadata);
+// Writes an entire track (both sides if 800K or Twiggy disk) from a DecodedSector array back into the disk image
+__attribute__((optimize("Ofast"))) void writeTrack(uint8_t track, File32* disk, DecodedSector sectors[2][22], DiskImageMetadata* metadata);
 
 // Closes the disk image file, making sure to update the DC42 header if needed/applicable
 void closeImage(File32* disk, DiskImageMetadata* metadata);

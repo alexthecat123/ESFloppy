@@ -29,13 +29,22 @@ inline __attribute__((__always_inline__)) uint8_t receiveData(){
     return REG_READ(GPIO_IN1_REG) >> 2; // Return the 8-bit value on the bus
 }
 
-// The only output pins on the floppy drive are RDA and the LED, and these functions set/clear them with direct register writes
+// The only output pins on the floppy drive are RDA, SNS, and the LED, and these functions set/clear them with direct register writes
 inline __attribute__((__always_inline__)) void writeRDA(bool state){
     if(state){
         REG_WRITE(GPIO_OUT_W1TS_REG, 0b1 << RDA);
     }
     else{
         REG_WRITE(GPIO_OUT_W1TC_REG, 0b1 << RDA);
+    }
+}
+
+inline __attribute__((__always_inline__)) void writeSNS(bool state){
+    if(state){
+        REG_WRITE(GPIO_OUT_W1TS_REG, 0b1 << SNS);
+    }
+    else{
+        REG_WRITE(GPIO_OUT_W1TC_REG, 0b1 << SNS);
     }
 }
 
@@ -108,11 +117,11 @@ inline __attribute__((__always_inline__)) bool readPWM(){
 }
 
 // And finally, a function to set all the pin modes (inputs/outputs) correctly
-void initPins() {
+inline void initPins() {
     pinMode(LED, OUTPUT);
     pinMode(RDA, OUTPUT);
     pinMode(WRD, INPUT);
-    pinMode(SNS, INPUT);
+    pinMode(SNS, OUTPUT);
     pinMode(WRQ, INPUT);
     pinMode(HDS, INPUT);
     pinMode(PH3, INPUT);
@@ -123,8 +132,12 @@ void initPins() {
     pinMode(MT0, INPUT);
     pinMode(DR1, INPUT);
     pinMode(DR0, INPUT);
-    setParallelDir(0); // Set the FPGA bus to input mode
+    //setParallelDir(0); // Set the FPGA bus to input mode
+    pinMode(LEFT, INPUT_PULLUP);
+    pinMode(SEL, INPUT_PULLUP);
+    pinMode(RIGHT, INPUT_PULLUP);
     pinMode(PWM, INPUT);
     digitalWrite(LED, LOW); // Turn off the LED initially
     digitalWrite(RDA, HIGH); // And keep RDA high to signify no drive connected until everything is set up
+    digitalWrite(SNS, LOW); // Drive SNS low to avoid asserting any of the Twiggy registers
 }

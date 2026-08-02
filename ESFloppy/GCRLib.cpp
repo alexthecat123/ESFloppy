@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "GCRLib.h"
 #include "types.h"
 
 // All the routines related to GCR encoding and decoding for ESFloppy
@@ -55,53 +56,105 @@ extern const uint8_t gcr_8to6[256] = {
 // We also need two interleave lookup tables, one for 2:1 interleave and one for 4:1 interleave
 // The DC42 format technically supports other interleave factors too, but I've never seen them used
 // So anything that's not 1:1, 2:1, or 4:1 will just be treated as 2:1
-// These interleave tables have to be valid for all 5 track sizes (12, 11, 10, 9, and 8 sectors per track)
-// Each table is indexed like table[sectorsPerTrack][slot] where sectorsPerTrack is the number of sectors on the current track and slot is the physical slot number (0-11) that we're trying to find the logical sector for
-extern const uint8_t interleave2to1[13][12] = {
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 0 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 1 sector/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 2 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 3 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 4 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 5 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 6 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 7 sectors/track (unused)
-    {   0,    4,    1,    5,    2,    6,    3,    7, 0xFF, 0xFF, 0xFF, 0xFF}, // 8 sectors/track (tracks 64-79)
-    {   0,    5,    1,    6,    2,    7,    3,    8,    4, 0xFF, 0xFF, 0xFF}, // 9 sectors/track (tracks 48-63)
-    {   0,    5,    1,    6,    2,    7,    3,    8,    4,    9, 0xFF, 0xFF}, // 10 sectors/track (tracks 32-47)
-    {   0,    6,    1,    7,    2,    8,    3,    9,    4,   10,    5, 0xFF}, // 11 sectors/track (tracks 16-31)
-    {   0,    6,    1,    7,    2,    8,    3,    9,    4,   10,    5,   11}, // 12 sectors/track (tracks 0-15)
+// These interleave tables have to be valid for all the track sizes, both Twiggy and Sony
+// Each table is indexed like table[sectorsPerTrack][slot] where sectorsPerTrack is the number of sectors on the current track and slot is the physical slot number (0-21) that we're trying to find the logical sector for
+// A little convenience here: Sony drives go from 8-12 sectors, and the Twiggy drives go from 15-22 sectors, so we can actually use the same table for both since there's no overlap
+// That leaves rows 0-7, 13 and 14 with nothing to describe, so they're filled with all 0xFF's
+#define INTERLEAVE_NONE {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+extern uint8_t interleave2to1[23][22] = {
+    INTERLEAVE_NONE, // 0 sectors/track (unused)
+    INTERLEAVE_NONE, // 1 sector/track (unused)
+    INTERLEAVE_NONE, // 2 sectors/track (unused)
+    INTERLEAVE_NONE, // 3 sectors/track (unused)
+    INTERLEAVE_NONE, // 4 sectors/track (unused)
+    INTERLEAVE_NONE, // 5 sectors/track (unused)
+    INTERLEAVE_NONE, // 6 sectors/track (unused)
+    INTERLEAVE_NONE, // 7 sectors/track (unused)
+    {   0,    4,    1,    5,    2,    6,    3,    7, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 8 sectors/track (Sony tracks 64-79)
+    {   0,    5,    1,    6,    2,    7,    3,    8,    4, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 9 sectors/track (Sony tracks 48-63)
+    {   0,    5,    1,    6,    2,    7,    3,    8,    4,    9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 10 sectors/track (Sony tracks 32-47)
+    {   0,    6,    1,    7,    2,    8,    3,    9,    4,   10,    5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 11 sectors/track (Sony tracks 16-31)
+    {   0,    6,    1,    7,    2,    8,    3,    9,    4,   10,    5,   11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 12 sectors/track (Sony tracks 0-15)
+    INTERLEAVE_NONE, // 13 sectors/track (unused)
+    INTERLEAVE_NONE, // 14 sectors/track (unused)
+    {   0,    8,    1,    9,    2,   10,    3,   11,    4,   12,    5,   13,    6,   14,    7, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 15 sectors/track (Twiggy tracks 42-45)
+    {   0,    8,    1,    9,    2,   10,    3,   11,    4,   12,    5,   13,    6,   14,    7,   15, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 16 sectors/track (Twiggy tracks 35-41)
+    {   0,    9,    1,   10,    2,   11,    3,   12,    4,   13,    5,   14,    6,   15,    7,   16,    8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 17 sectors/track (Twiggy tracks 29-34)
+    {   0,    9,    1,   10,    2,   11,    3,   12,    4,   13,    5,   14,    6,   15,    7,   16,    8,   17, 0xFF, 0xFF, 0xFF, 0xFF}, // 18 sectors/track (Twiggy tracks 23-28)
+    {   0,   10,    1,   11,    2,   12,    3,   13,    4,   14,    5,   15,    6,   16,    7,   17,    8,   18,    9, 0xFF, 0xFF, 0xFF}, // 19 sectors/track (Twiggy tracks 17-22)
+    {   0,   10,    1,   11,    2,   12,    3,   13,    4,   14,    5,   15,    6,   16,    7,   17,    8,   18,    9,   19, 0xFF, 0xFF}, // 20 sectors/track (Twiggy tracks 11-16)
+    {   0,   11,    1,   12,    2,   13,    3,   14,    4,   15,    5,   16,    6,   17,    7,   18,    8,   19,    9,   20,   10, 0xFF}, // 21 sectors/track (Twiggy tracks 4-10)
+    {   0,   11,    1,   12,    2,   13,    3,   14,    4,   15,    5,   16,    6,   17,    7,   18,    8,   19,    9,   20,   10,   21}, // 22 sectors/track (Twiggy tracks 0-3)
 };
 
 // Same idea for 4:1 interleave
-// Note that 4 and 8 share a common factor, so a true 4:1 layout is impossible on an 8-sector track;
-// that row ends up alternating 4 and 5 slots between consecutive logical sectors, which is as close as it gets
-extern const uint8_t interleave4to1[13][12] = {
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 0 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 1 sector/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 2 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 3 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 4 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 5 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 6 sectors/track (unused)
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 7 sectors/track (unused)
-    {   0,    2,    4,    6,    1,    3,    5,    7, 0xFF, 0xFF, 0xFF, 0xFF}, // 8 sectors/track (tracks 64-79)
-    {   0,    7,    5,    3,    1,    8,    6,    4,    2, 0xFF, 0xFF, 0xFF}, // 9 sectors/track (tracks 48-63)
-    {   0,    5,    3,    8,    1,    6,    4,    9,    2,    7, 0xFF, 0xFF}, // 10 sectors/track (tracks 32-47)
-    {   0,    3,    6,    9,    1,    4,    7,   10,    2,    5,    8, 0xFF}, // 11 sectors/track (tracks 16-31)
-    {   0,    3,    6,    9,    1,    4,    7,   10,    2,    5,    8,   11}, // 12 sectors/track (tracks 0-15)
+extern uint8_t interleave4to1[23][22] = {
+    INTERLEAVE_NONE, // 0 sectors/track (unused)
+    INTERLEAVE_NONE, // 1 sector/track (unused)
+    INTERLEAVE_NONE, // 2 sectors/track (unused)
+    INTERLEAVE_NONE, // 3 sectors/track (unused)
+    INTERLEAVE_NONE, // 4 sectors/track (unused)
+    INTERLEAVE_NONE, // 5 sectors/track (unused)
+    INTERLEAVE_NONE, // 6 sectors/track (unused)
+    INTERLEAVE_NONE, // 7 sectors/track (unused)
+    {   0,    2,    4,    6,    1,    3,    5,    7, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 8 sectors/track (Sony tracks 64-79)
+    {   0,    7,    5,    3,    1,    8,    6,    4,    2, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 9 sectors/track (Sony tracks 48-63)
+    {   0,    5,    3,    8,    1,    6,    4,    9,    2,    7, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 10 sectors/track (Sony tracks 32-47)
+    {   0,    3,    6,    9,    1,    4,    7,   10,    2,    5,    8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 11 sectors/track (Sony tracks 16-31)
+    {   0,    3,    6,    9,    1,    4,    7,   10,    2,    5,    8,   11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 12 sectors/track (Sony tracks 0-15)
+    INTERLEAVE_NONE, // 13 sectors/track (unused)
+    INTERLEAVE_NONE, // 14 sectors/track (unused)
+    {   0,    4,    8,   12,    1,    5,    9,   13,    2,    6,   10,   14,    3,    7,   11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 15 sectors/track (Twiggy tracks 42-45)
+    {   0,    4,    8,   12,    1,    5,    9,   13,    2,    6,   10,   14,    3,    7,   11,   15, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 16 sectors/track (Twiggy tracks 35-41)
+    {   0,   13,    9,    5,    1,   14,   10,    6,    2,   15,   11,    7,    3,   16,   12,    8,    4, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 17 sectors/track (Twiggy tracks 29-34)
+    {   0,    9,    5,   14,    1,   10,    6,   15,    2,   11,    7,   16,    3,   12,    8,   17,    4,   13, 0xFF, 0xFF, 0xFF, 0xFF}, // 18 sectors/track (Twiggy tracks 23-28)
+    {   0,    5,   10,   15,    1,    6,   11,   16,    2,    7,   12,   17,    3,    8,   13,   18,    4,    9,   14, 0xFF, 0xFF, 0xFF}, // 19 sectors/track (Twiggy tracks 17-22)
+    {   0,    5,   10,   15,    1,    6,   11,   16,    2,    7,   12,   17,    3,    8,   13,   18,    4,    9,   14,   19, 0xFF, 0xFF}, // 20 sectors/track (Twiggy tracks 11-16)
+    {   0,   16,   11,    6,    1,   17,   12,    7,    2,   18,   13,    8,    3,   19,   14,    9,    4,   20,   15,   10,    5, 0xFF}, // 21 sectors/track (Twiggy tracks 4-10)
+    {   0,   11,    6,   17,    1,   12,    7,   18,    2,   13,    8,   19,    3,   14,    9,   20,    4,   15,   10,   21,    5,   16}, // 22 sectors/track (Twiggy tracks 0-3)
+};
+
+// We'll also make a straight-through mapping for 1:1 just so that getInterleaveTable() can return a valid pointer for it
+extern uint8_t interleave1to1[23][22] = {
+    INTERLEAVE_NONE, // 0 sectors/track (unused)
+    INTERLEAVE_NONE, // 1 sector/track (unused)
+    INTERLEAVE_NONE, // 2 sectors/track (unused)
+    INTERLEAVE_NONE, // 3 sectors/track (unused)
+    INTERLEAVE_NONE, // 4 sectors/track (unused)
+    INTERLEAVE_NONE, // 5 sectors/track (unused)
+    INTERLEAVE_NONE, // 6 sectors/track (unused)
+    INTERLEAVE_NONE, // 7 sectors/track (unused)
+    {   0,    1,    2,    3,    4,    5,    6,    7, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 8 sectors/track (Sony tracks 64-79)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 9 sectors/track (Sony tracks 48-63)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 10 sectors/track (Sony tracks 32-47)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 11 sectors/track (Sony tracks 16-31)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 12 sectors/track (Sony tracks 0-15)
+    INTERLEAVE_NONE, // 13 sectors/track (unused)
+    INTERLEAVE_NONE, // 14 sectors/track (unused)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 15 sectors/track (Twiggy tracks 42-45)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 16 sectors/track (Twiggy tracks 35-41)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15,   16, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // 17 sectors/track (Twiggy tracks 29-34)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15,   16,   17, 0xFF, 0xFF, 0xFF, 0xFF}, // 18 sectors/track (Twiggy tracks 23-28)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15,   16,   17,   18, 0xFF, 0xFF, 0xFF}, // 19 sectors/track (Twiggy tracks 17-22)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15,   16,   17,   18,   19, 0xFF, 0xFF}, // 20 sectors/track (Twiggy tracks 11-16)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15,   16,   17,   18,   19,   20, 0xFF}, // 21 sectors/track (Twiggy tracks 4-10)
+    {   0,    1,    2,    3,    4,    5,    6,    7,    8,    9,   10,   11,   12,   13,   14,   15,   16,   17,   18,   19,   20,   21}, // 22 sectors/track (Twiggy tracks 0-3)
 };
 
 // This function takes a decoded sector and encodes it into GCR format
-void encodeSector(DecodedSector* decoded, GcrSector* gcr) {
+void encodeSector(DecodedSector* decoded, GcrSector* gcr, DiskImageMetadata* metadata) {
     // First let's fill in the header fields, making sure to GCR-encode each one along the way
-    uint8_t loTrack = decoded->track & 0x3F; // Low 6 bits of track
+    uint8_t loTrack = decoded->track & 0x3F; // Low 6 bits of track (which is the full track number for Twiggy drives)
     uint8_t sectorNum = decoded->sector & 0x3F; // Sector number gets pulled straight over, with a mask to keep it within 6 bits
-    uint8_t hiTrackSide = ((decoded->track & 0x40) >> 6) | ((decoded->side & 0x01) << 5); // High track bit in bit 0, side in bit 5
-    uint8_t format = decoded->format & 0x3F; // Format byte gets pulled straight over too; just isolate the low 6 bits to fit with GCR
+    // hiTrackSide differs depending on whether this is a Sony or Twiggy drive
+    // For Sony drives, the high track bit is in bit 0, side is in bit 5
+    // For Twiggies, the side is in bit 0 and everything else is 0
+    uint8_t hiTrackSide = metadata->driveType == DriveTwiggy ? ((decoded->side & 0x01) << 0) : (((decoded->track & 0x40) >> 6) | ((decoded->side & 0x01) << 5));
+    uint8_t format = decoded->format & 0x3F; // Format byte gets pulled straight over; just isolate the low 6 bits to fit with GCR
     gcr->loTrack = gcr_6to8[loTrack]; // Low 6 bits of track
     gcr->sector = gcr_6to8[sectorNum]; // Sector number gets pulled straight over
-    gcr->hiTrackSide = gcr_6to8[hiTrackSide]; // High track bit in bit 0, side in bit 5
+    gcr->hiTrackSide = gcr_6to8[hiTrackSide]; // High track and/or side depending on drive type
     gcr->format = gcr_6to8[format]; // Format byte gets pulled straight over too
     // Simple XOR checksum of the header fields; compute the checksum of the raw (non-GCR) values and then encode it as GCR
     gcr->headerChecksum = gcr_6to8[loTrack ^ sectorNum ^ hiTrackSide ^ format];
@@ -191,18 +244,18 @@ void encodeSector(DecodedSector* decoded, GcrSector* gcr) {
     gcr->dataChecksum[3] = gcr_6to8[nibl4];
 }
 
-bool decodeSector(GcrSector* gcr, DecodedSector* decoded) {
+bool decodeSector(GcrSector* gcr, DecodedSector* decoded, DiskImageMetadata* metadata) {
     // Make a backup copy of the current contents of decoded so we can restore it if the sector we're decoding now is invalid
     DecodedSector backup;
     memcpy(&backup, decoded, sizeof(DecodedSector));
     // Decoding is (obviously) just the reverse of encoding; first do the header
     bool sectorValid = true; // Assume the sector is valid until we find a problem
-    // Reconstruct the track number from the low and high bits, decoding the GCR along the way
-    decoded->track = gcr_8to6[gcr->loTrack] | ((gcr_8to6[gcr->hiTrackSide] & 0x01) << 6);
+    // Reconstruct the track number from the low and high bits (Sony) or just the low bits (Twiggy), decoding the GCR along the way
+    decoded->track = metadata->driveType == DriveTwiggy ? (gcr_8to6[gcr->loTrack]) : (gcr_8to6[gcr->loTrack] | ((gcr_8to6[gcr->hiTrackSide] & 0x01) << 6));
     // The sector comes straight over
     decoded->sector = gcr_8to6[gcr->sector];
-    // The side is in bit 5 of hiTrackSide
-    decoded->side = (gcr_8to6[gcr->hiTrackSide] & 0x20) >> 5;
+    // The side is in bit 0 (Twiggy) or bit 5 (Sony) of hiTrackSide depending on the drive type
+    decoded->side = metadata->driveType == DriveTwiggy ? (gcr_8to6[gcr->hiTrackSide] & 0x01) : ((gcr_8to6[gcr->hiTrackSide] & 0x20) >> 5);
     // And the format byte comes straight over too
     decoded->format = gcr_8to6[gcr->format];
     // Now check the header checksum; it should be the XOR of the other header fields
@@ -300,79 +353,134 @@ bool decodeSector(GcrSector* gcr, DecodedSector* decoded) {
 }
 
 // This function encodes an entire decoded track (all sectors) into GCR format
-// It takes the track number and a pointer to an array of DecodedSector structs as input
+// It takes the track number (or carriage position for Twiggy) and a pointer to an array of DecodedSector structs as input
 // And outputs an array of GcrSector structs
-void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][12], GcrSector gcrSectors[2][12], DiskImageMetadata* metadata) {
-    // First we need to figure out how many sectors are on this track
-    uint32_t sectorCount = sectorsPerTrack[track];
+void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][22], GcrSector gcrSectors[2][22], DiskImageMetadata* metadata) {
+    // Start by making sure that the track provided to us is in bounds for our given drive type; just return if not
+    if (metadata->driveType == Drive400 || metadata->driveType == Drive800) {
+        // So that's 0-79 on Sony
+        if (track > 79) {
+            return;
+        }
+    } else {
+        // And 0-45 on Twiggy
+        if (track > 45) {
+            return;
+        }
+    }
+    
+    // Next we need to figure out how many sectors are on this track
+    uint32_t sectorCount[2] = {0, 0};
+    if (metadata->driveType == Drive400 || metadata->driveType == Drive800) {
+        // For Sony, this is really easy; both sides have the same number of sectors
+        sectorCount[0] = sectorsPerTrackSony[track];
+        sectorCount[1] = sectorCount[0];
+    } else {
+        // For Twiggy, we have to check each side separately since they have different numbers of sectors thanks to the offset heads
+        sectorCount[0] = sectorsPerTrackTwiggy[45 - track]; // Side 0 is 45 - the carriage position
+        sectorCount[1] = sectorsPerTrackTwiggy[track]; // And side 1 is just the carriage position
+    }
     // Now encode each sector into GCR format and put it in the output array
-    // If it's a double-sided disk, we have to do both sides
-    if (metadata->driveType == Drive800) {
+    // If it's a double-sided disk (Twiggy or 800K), we have to do both sides
+    if ((metadata->driveType == DriveTwiggy) || (metadata->driveType == Drive800)) {
+        // Check which interleave table to use; this gets really annoying to do over and over again
+        // So just call the getInterleaveTable function to get the proper one for this drive type and sector format byte
+        // The false tells it to use the decodedSectors format byte instead of the metadata one
+        InterleaveTable interleaveTable = getInterleaveTable(metadata, decodedSectors[0][0].format, false);
         for(int i = 0; i < 2; i++) {
-            for (int j = 0; j < sectorCount; j++) {
-                // Check which interleave table to use based on the interleave factor in the metadata
-                if ((decodedSectors[0][0].format & 0x1F) == 0x04) {
-                    // We have a case for 4:1 interleave
-                    encodeSector(&decodedSectors[i][interleave4to1[sectorCount][j]], &gcrSectors[i][j]);
-                } else if ((decodedSectors[0][0].format & 0x1F) == 0x01) {
-                    // And another case for 1:1 interleave, which doesn't need an interleave table at all
-                    encodeSector(&decodedSectors[i][j], &gcrSectors[i][j]);
-                } else {
-                    // Otherwise we default to 2:1 interleave
-                    encodeSector(&decodedSectors[i][interleave2to1[sectorCount][j]], &gcrSectors[i][j]);
-                }
+            // And now loop over every sector and every side and encode them into GCR using that interleave table
+            // Make sure to also pick the proper sectorCount for each side since this matters for Twiggy
+            for (int j = 0; j < sectorCount[i]; j++) {
+                encodeSector(&decodedSectors[i][interleaveTable[sectorCount[i]][j]], &gcrSectors[i][j], metadata);
             }
         }
     }
     // Otherwise it's a single-sided disk, so just do side 0
+    // No need to do the Sony vs Twiggy check here since we already know it's single-sided and Twiggies are double-sided
     else {
-        for (int i = 0; i < sectorCount; i++) {
-            if ((decodedSectors[0][0].format & 0x1F) == 0x04) {
-                encodeSector(&decodedSectors[0][interleave4to1[sectorCount][i]], &gcrSectors[0][i]);
-            } else if ((decodedSectors[0][0].format & 0x1F) == 0x01) {
-                encodeSector(&decodedSectors[0][i], &gcrSectors[0][i]);
-            } else {
-                encodeSector(&decodedSectors[0][interleave2to1[sectorCount][i]], &gcrSectors[0][i]);
-            }
+        InterleaveTable interleaveTable = getInterleaveTable(metadata, decodedSectors[0][0].format, false);
+        for (int i = 0; i < sectorCount[0]; i++) {
+            encodeSector(&decodedSectors[0][interleaveTable[sectorCount[0]][i]], &gcrSectors[0][i], metadata);
         }
     }
 }
 
 // This function decodes an entire GCR track (all sectors) into decoded format
-void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][12], DecodedSector decodedSectors[2][12], DiskImageMetadata* metadata) {
-    // First we need to figure out how many sectors are on this track
-    uint32_t sectorCount = sectorsPerTrack[track];
+void decodeTrackFromGCR(uint8_t track, GcrSector gcrSectors[2][22], DecodedSector decodedSectors[2][22], DiskImageMetadata* metadata) {
+    // Same as with encodeTrackToGCR, start by making sure that track is in bounds
+    if (metadata->driveType == Drive400 || metadata->driveType == Drive800) {
+        // So that's 0-79 on Sony
+        if (track > 79) {
+            return;
+        }
+    } else {
+        // And 0-45 on Twiggy
+        if (track > 45) {
+            return;
+        }
+    }
+
+    // Now figure out how many sectors are on each side of this track
+    uint32_t sectorCount[2] = {0, 0};
+    if (metadata->driveType == Drive400 || metadata->driveType == Drive800) {
+        // Both sides have the same number of sectors on Sony
+        sectorCount[0] = sectorsPerTrackSony[track];
+        sectorCount[1] = sectorCount[0];
+    } else {
+        // Each side has a different number of sectors on Twiggy
+        sectorCount[0] = sectorsPerTrackTwiggy[45 - track];
+        sectorCount[1] = sectorsPerTrackTwiggy[track];
+    }
     // Now decode each sector from GCR format into decoded format
-    // If it's a double-sided disk, we have to do both sides
-    if (metadata->driveType == Drive800) {
+    // If it's a double-sided disk (Twiggy/800K Sony), we have to do both sides
+    if (metadata->driveType == DriveTwiggy || metadata->driveType == Drive800) {
+        // As in encodeTrackToGCR, use getInterleaveTable to figure out which interleave table to use for this sector
+        // Use the format from gcrSectors instead of decodedSectors since gcrSectors might have been modified by a format op from the Lisa
+        // And this change won't have been committed to decodedSectors yet
+        InterleaveTable interleaveTable = getInterleaveTable(metadata, gcr_8to6[gcrSectors[0][0].format], false);
         for(int i = 0; i < 2; i++) {
-            for (int j = 0; j < sectorCount; j++) {
-                // Check which interleave table to use based on the interleave factor in the metadata
-                // Use the format from gcrSectors instead of decodedSectors since gcrSectors might have been modified by a format op from the Lisa
-                // And this change won't have been committed to decodedSectors yet
-                if ((gcr_8to6[gcrSectors[i][j].format] & 0x1F) == 0x04) {
-                    // We have a case for 4:1 interleave
-                    decodeSector(&gcrSectors[i][j], &decodedSectors[i][interleave4to1[sectorCount][j]]);
-                } else if ((gcr_8to6[gcrSectors[i][j].format] & 0x1F) == 0x01) {
-                    // And another case for 1:1 interleave, which doesn't need an interleave table at all
-                    decodeSector(&gcrSectors[i][j], &decodedSectors[i][j]);
-                } else {
-                    // Otherwise we default to 2:1 interleave
-                    decodeSector(&gcrSectors[i][j], &decodedSectors[i][interleave2to1[sectorCount][j]]);
-                }
+            for (int j = 0; j < sectorCount[i]; j++) {
+                // And decode the sector accordingly, using the proper side of sectorCount
+                decodeSector(&gcrSectors[i][j], &decodedSectors[i][interleaveTable[sectorCount[i]][j]], metadata);
             }
         }
     }
     // Otherwise it's a single-sided disk, so just do side 0
+    // As with encoding, no need to do the Twiggy vs Sony check here since Twiggies can't be single-sided
     else {
-        for (int i = 0; i < sectorCount; i++) {
-            if ((gcr_8to6[gcrSectors[0][i].format] & 0x1F) == 0x04) {
-                decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave4to1[sectorCount][i]]);
-            } else if ((gcr_8to6[gcrSectors[0][i].format] & 0x1F) == 0x01) {
-                decodeSector(&gcrSectors[0][i], &decodedSectors[0][i]);
-            } else {
-                decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleave2to1[sectorCount][i]]);
-            }
+        InterleaveTable interleaveTable = getInterleaveTable(metadata, gcr_8to6[gcrSectors[0][0].format], false);
+        for (int i = 0; i < sectorCount[0]; i++) {
+            decodeSector(&gcrSectors[0][i], &decodedSectors[0][interleaveTable[sectorCount[0]][i]], metadata);
         }
     }
+}
+
+// Returns a pointer to the proper interleave table for the given disk image metadata
+// The format parameter can come from either diskFormat in the metadata header (useMetadataFormat = true)
+// Or from the uint8_t format parameter passed in (useMetadataFormat = false)
+__attribute__((optimize("Ofast"))) IRAM_ATTR InterleaveTable getInterleaveTable(DiskImageMetadata* metadata, uint8_t format, bool useMetadataFormat) {
+    // For Sony drives, we can check the format byte to directly determine the interleave
+    // But for Twiggies, it's never given anywhere and so we kind of just have to guess
+    // I'm going to assume 2:1 interleave for Twiggy on Mac/Lisa and 4:1 on Apple II and Apple ///
+    // I can confirm that 2:1 is correct for the Lisa at the very least, but I have no clue about the others
+    uint8_t formatByte = useMetadataFormat ? metadata->header.diskFormat : format;
+    // First, handle the Twiggy case
+    if (metadata->driveType == DriveTwiggy) {
+        if ((formatByte & 0x3F) == 0x00) {
+            return interleave4to1; // For Apple II and Apple ///, assume 4:1 interleave
+        }
+        // For all other cases (Lisa, Mac, and unknown), use 2:1 interleave
+        return interleave2to1;
+    }
+    if (metadata->driveType == Drive400 || metadata->driveType == Drive800) {
+        // For Sony drives, we can use the format byte to determine the interleave directly
+        if ((formatByte & 0x1F) == 0x04) {
+            return interleave4to1; // Format byte of 0x04 indicates 4:1 interleave
+        } else if ((formatByte & 0x1F) == 0x01) {
+            return interleave1to1; // Format byte of 0x01 indicates 1:1 interleave
+        } else {
+            return interleave2to1; // All other format bytes indicate 2:1 interleave
+        }
+    }
+    return interleave2to1; // Default to 2:1 interleave for any other drive types, although we should never end up here
 }

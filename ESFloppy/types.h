@@ -13,17 +13,17 @@
 #define PH2 10
 #define PH1 11
 #define PH0 12
-#define SD_SCK 41 // MTDI 41
-#define SD_MOSI 40 // MTDO 40
-#define SD_MISO 13 // 13
-#define SD_CS 16 // 32K_N 16
+#define SD_SCK 41
+#define SD_MOSI 40
+#define SD_MISO 13
+#define SD_CS 16
 #define MT1 17
 #define MT0 18
 #define DR1 21
 #define DR0 33
-#define FPGA_0 34
-#define FPGA_1 35
-#define FPGA_2 36
+#define LEFT 34
+#define SEL 35
+#define RIGHT 36
 #define FPGA_3 37
 #define FPGA_4 38
 #define FPGA_5 39
@@ -38,23 +38,16 @@
 #define TAG_SIZE_400K 9600
 #define TAG_SIZE_800K 19200
 
-// Addresses for all the RMT-related registers
-#define RMT_BASE 0x60016000
-#define SYSTEM_BASE 0x600C0000
-#define GPIO_BASE 0x60004000
+// Same for Twiggy disks
+#define DATA_SIZE_TWIGGY 871424
+#define TAG_SIZE_TWIGGY 20424
 
-#define RMT_CH0_FIFO RMT_BASE
-#define RMT_CH0CONF0_REG (RMT_BASE + 0x20)
-#define RMT_CH0STATUS_REG (RMT_BASE + 0x50)
-#define RMT_SYS_CONF_REG (RMT_BASE + 0xC0)
-#define RMT_INT_RAW_REG (RMT_BASE + 0x70)
-#define RMT_INT_CLR_REG (RMT_BASE + 0x7C)
-#define RMT_CH0_TX_LIM_REG (RMT_BASE + 0xA0)
-
-#define SYSTEM_PERIP_CLK_EN0_REG (SYSTEM_BASE + 0x18)
-#define SYSTEM_PERIP_RST_EN0_REG (SYSTEM_BASE + 0x20)
-
-#define GPIO_FUNC4_OUT_SEL_CFG_REG (GPIO_BASE + 0x564)
+// A dc42 image is a 400K image if the encoding byte is 0
+#define DC42_400K_ENCODING 0x00
+// It's 800K if the encoding byte is 1
+#define DC42_800K_ENCODING 0x01
+// And it's a Twiggy image if the encoding byte is 0x54
+#define DC42_TWIGGY_ENCODING 0x54
 
 // The size of each GCR-encoded sector in bits
 #define BITS_PER_SECTOR (sizeof(GcrSector) * 8)
@@ -69,18 +62,39 @@
 #define BIT_TIME_01 1195 // 4us with some tolerance (2.5 bit cells)
 #define BIT_TIME_001 1673 // 6us with some tolerance (3.5 bit cells)
 
-// Lookup tables for the number of sectors per track and tachometer pulses per track
-extern uint32_t sectorsPerTrack[80];
+// LUTs describing the drive geometry and tachometer pulse counts for the various different drive types that we support
+// Go check geometry.cpp for the actual definitions and meanings of these arrays
+extern uint32_t sectorsPerTrackSony[80];
+extern uint32_t sectorsPerTrackTwiggy[46];
 extern uint32_t tachPulsesPerTrackMac[80];
 extern uint32_t tachDividerPerTrackMac[80];
 extern uint32_t tachPulsesPerTrackLisa[80];
 extern uint32_t tachDividerPerTrackLisa[80];
 
+// This enum defines the different commands that we can send to the SD card task that runs on the other core
+enum SdTaskCommand {
+    READ_TRACK, // Just read a track and encode it to GCR
+    WRITE_READ_TRACK, // Write out a track and then read in another
+    CLOSE_IMAGE // Close the disk image file with closeImage()
+};
+
+// This struct is used to pass data to the SD card task
+struct SdTaskInterface {
+    uint8_t writeTrack; // What track to write
+    uint8_t readTrack; // What track to read
+    SdTaskCommand command; // What command to execute
+    bool start; // We set this high to tell the task to start processing our requect
+    bool finished; // The task sets this high when it's finished processing our request
+    bool initDone; // This goes high when the task is done initializing itelf
+};
+
 // A decoded sector is super simple: just the track, sector, side, format, and 524 bytes of data
-// The only one of these that even needs explanation is the format byte, which is as follows:
+// The only one of these that even needs explanation is the format byte, which is as follows for a Sony disk:
 // Bits [4:0] - Interleave factor: 2 = 2:1 interleave, 4 = 4:1 interleave
 // Bit 5 - Set if double-sided disk, clear if not
 // Bits [7:6] - Always 0 because GCR only uses 6 bits and this byte gets transferred as-is in the sector header
+// The interpretation for a Twiggy disk is significantly simpler; it can only be 0, 1, or 2, representing which computer the disk was formatted for
+// 0 means Apple II or ///, 1 means Lisa, and 2 means Mac, so realistically all we'll ever see is 1
 struct DecodedSector {
     uint8_t track;
     uint8_t sector;
@@ -90,6 +104,8 @@ struct DecodedSector {
 };
 
 // A GCR-encoded sector is a lot more complex, since it has all the sync bytes, prologues, epilogues, checksums, and GCR-encoded data
+// Conveniently enough, the GCR sector encoding is identical between Sony and Twiggy disks
+// The only difference is the interpretation of a few of the header fields
 struct GcrSector {
     // First there's a header that comes before the data itself; it contains info about the sector
     // Before the header though, there are 6 sync bytes that the floppy state machine looks for to get in sync
@@ -97,15 +113,16 @@ struct GcrSector {
     uint8_t headerSync[75] = {0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC, 0xFF, 0x3F, 0xCF, 0xF3, 0xFC};
     // And then a prologue to mark the start of the header
     uint8_t headerPrologue[3] = {0xD5, 0xAA, 0x96};
-    // Then the actual header fields; first we have the low 6 bits of the track number
+    // Then the actual header fields; first we have the low 6 bits of the Sony track number (which is the whole track number for a Twiggy)
     // Remember, everything here must fit in 6 bits since this is GCR-encoded data
     uint8_t loTrack;
     // Then we have the sector number
     uint8_t sector;
-    // Then a byte that contains the high bit of the track number as well as the side number
-    // The side number (0 = side 0, 1 = side 1) is in bit 5, and the high track bit is in bit 0, all other bits are 0
+    // Then a byte that contains the high bit of the track number as well as the side number for Sony, and just the side number for Twiggy
+    // For Sony, the side number (0 = side 0, 1 = side 1) is in bit 5, and the high track bit is in bit 0, all other bits are 0
+    // For Twiggy, the side number is in bit 0, all other bits are 0
     uint8_t hiTrackSide;
-    // Then we have the format byte, which is transferred as-is from the decoded sector
+    // Then we have the format byte, which has different meanings between Sony and Twiggy, as described with DecodedSector above
     uint8_t format;
     // The header checksum is next, and it's just a simple XOR of the previous four header bytes
     uint8_t headerChecksum;
@@ -125,28 +142,25 @@ struct GcrSector {
     uint8_t dataEpilogue[3] = {0xDE, 0xAA, 0xFF}; // Epilogue is only 2 bytes, the third is the don't care "heads off" byte
 };
 
-// Each RMT data item is 32 bits:
-// Bit 31 - Level of first part of the pulse
-// Bits [30:16] - Duration of first part of the pulse in RMT clock ticks
-// Bit 15 - Level of second part of the pulse
-// Bits [14:0] - Duration of second part of the pulse in RMT clock
-struct RMTDataItem {
-    uint16_t duration0 : 15;
-    uint16_t level0 : 1;
-    uint16_t duration1 : 15;
-    uint16_t level1 : 1;
+// A struct that contains some parameters related to a track
+// The only reason we really need this is because we need to pass these to a couple different functions
+// And it would be a pain to pass them all individually
+struct TrackParams {
+    bool motorOn; // Whether the motor is on or not
+    uint32_t pendingTrackToWrite; // The track number we want to write to (if any)
+    SdTaskCommand pendingCommand; // The command we want to send to the SD card task (if any)
+    bool pendingDispatch; // A flag that indicates whether there's a pending command to dispatch to the SD card task
+    uint32_t currentTrack; // The track number we're currently on
+    bool trackChanged; // A flag that indicates whether the track has changed since the last time we checked
+    uint32_t stashCount; // How many sectors are currently in the write stash
+    bool dirty; // A flag that indicates whether the current track has been modified and needs to be written out
 };
 
-// A sector in RMT format
-struct RMTSector {
-    // Each GCR sector it 733 bytes long total, and each byte becomes 8 RMT data items (1 per bit)
-    RMTDataItem data[733 * 8];
-};
-
-// An enum for whether the drive is a 400K or 800K drive
+// An enum for whether the drive is a 400K Sony, 800K Sony, or a Twiggy
 enum DriveType {
     Drive400 = 0,
-    Drive800 = 1
+    Drive800 = 1,
+    DriveTwiggy = 2
 };
 
 // One for the image format, DC42 or raw
@@ -182,7 +196,7 @@ struct DC42Header {
 };
 
 // A struct that contains all the current disk image's metadata
-// So the dc42 header, but also the image type, drive type, whether tags are present, and whether a disk is inserted
+// So the dc42 header, but also the image type, drive type, whether tags are present, whether a disk is inserted, and drive index
 struct DiskImageMetadata {
     DC42Header header;
     ImageType imageType;
@@ -191,4 +205,13 @@ struct DiskImageMetadata {
     bool diskInserted = false;
     uint32_t startAddress; // The starting address of the disk image in the SD card file system
     uint32_t endAddress; // And the end address
+    uint32_t driveIndex; // The index of the drive that this disk image is currently inserted into (0 or 1); needed for Twiggy support
+};
+
+// We can't pass multiple parameters to a task, so we need to make a struct to hold all the parameters that we want to pass to the SD task
+struct SdTaskParams {
+    volatile SdTaskInterface* sdTaskInterface; // A pointer to the SdTaskInterface struct is the first param
+    GcrSector (&trackBufferGCR)[2][22]; // We also need to pass in references to the two track buffers
+    DecodedSector (&trackBufferDecoded)[2][22];
+    DiskImageMetadata* diskMetadata; // And finally, a pointer to the disk metadata struct
 };
