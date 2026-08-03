@@ -109,7 +109,7 @@ void sdCardTask(void* params) {
     //My Lisa Stuff/MacWorks Plus II Install.image
     //LisaTest 3.0 1.image
     //copy_image_800k.dc42
-    if (!openImage("Twiggy/LisaGraph 1.0.dc42", &disk, sdTaskParams->diskMetadata)) { // And try opening a disk image file
+    if (!openImage("twiggy.dc42", &disk, sdTaskParams->diskMetadata)) { // And try opening a disk image file
         Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
         OLED.clearDisplay();
         OLED.setTextSize(2);
@@ -153,12 +153,14 @@ void sdCardTask(void* params) {
         if (sdTaskParams->sdTaskInterface->command == WRITE_READ_TRACK) {
             decodeTrackFromGCR(sdTaskParams->sdTaskInterface->writeTrack, sdTaskParams->trackBufferGCR, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata);
             uint32_t startTime = micros();
+            // If a -1 arrives here (the Twiggy timing track), then it goes through as a 255 and writeTrack rejects it, just like we want
             writeTrack(sdTaskParams->sdTaskInterface->writeTrack, &disk, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata);
             snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Took %dus to write track.\n", micros() - startTime);
             debugPrint(debugString, strlen(debugString));
         }
         if (sdTaskParams->sdTaskInterface->command == READ_TRACK || sdTaskParams->sdTaskInterface->command == WRITE_READ_TRACK) {
             // If the command is either a read OR write, then we now need to read the requested track and encode it to GCR
+            // Same deal here with the -1 for the Twiggy timing track; readTrack will reject it and not read anything
             readTrack(sdTaskParams->sdTaskInterface->readTrack, &disk, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata);
             encodeTrackToGCR(sdTaskParams->sdTaskInterface->readTrack, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata);
         }

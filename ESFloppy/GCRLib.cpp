@@ -403,6 +403,38 @@ void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][22], GcrSec
             encodeSector(&decodedSectors[0][interleaveTable[sectorCount[0]][i]], &gcrSectors[0][i], metadata);
         }
     }
+
+    // One additional nuance here in the Twiggy case
+    // All Twiggy tracks have a sequence of "timing bytes" (0xA9) right before the header prologue
+    // But ONLY on logical sector 0 of each track
+    // The easiest way to handle this is to just check for Twiggy, and then just replace the last 10 sync bytes with A9's if so
+    if (metadata->driveType == DriveTwiggy) {
+        // First, get a pointer to 10 bytes before the header prologue of sector 0, ensuring that we use logical not physical sector 0
+        InterleaveTable interleaveTable = getInterleaveTable(metadata, gcr_8to6[gcrSectors[0][0].format], false);
+        // Find the proper physical slot that holds logical sector 0 the same way that we do in fluxRW.cpp
+        uint32_t slot = 0;
+        for (uint32_t i = 0; i < sectorCount[0]; i++) {
+            if (interleaveTable[sectorCount[0]][i] == 0) {
+                slot = i;
+                break;
+            }
+        }
+        uint8_t* timingBytes = gcrSectors[0][slot].headerPrologue - 10;
+        for (int i = 0; i < 10; i++) {
+            timingBytes[i] = 0xA9; // And replace all 10 of them with A9's
+        }
+        // Now repeat for side 1 as well
+        for (uint32_t i = 0; i < sectorCount[1]; i++) {
+            if (interleaveTable[sectorCount[1]][i] == 0) {
+                slot = i;
+                break;
+            }
+        }
+        timingBytes = gcrSectors[1][slot].headerPrologue - 10;
+        for (int i = 0; i < 10; i++) {
+            timingBytes[i] = 0xA9;
+        }
+    }
 }
 
 // This function decodes an entire GCR track (all sectors) into decoded format

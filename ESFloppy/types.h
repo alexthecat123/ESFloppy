@@ -150,7 +150,7 @@ struct TrackParams {
     uint32_t pendingTrackToWrite; // The track number we want to write to (if any)
     SdTaskCommand pendingCommand; // The command we want to send to the SD card task (if any)
     bool pendingDispatch; // A flag that indicates whether there's a pending command to dispatch to the SD card task
-    uint32_t currentTrack; // The track number we're currently on
+    int32_t currentTrack; // The track number we're currently on; signed so that we can reach Twiggy track -1
     bool trackChanged; // A flag that indicates whether the track has changed since the last time we checked
     uint32_t stashCount; // How many sectors are currently in the write stash
     bool dirty; // A flag that indicates whether the current track has been modified and needs to be written out

@@ -284,10 +284,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                 // Notice that we subtract 12 from the microstep count
                 // This is because microstep 12 represents the middle of track 0, and we want it to be able to go to track -1 for the CAL sequence
                 int32_t rawTrack = (microStepCount - 12) >> 3;
-                // We'll use the rawTrack (the signed track number) internally, but we need to keep it 0-45 for the SD card task
-                // So store it in currentTrack within this proper range
-                if (rawTrack < 0) {
-                    trackParams.currentTrack = 0;
+                // currentTrack can be either -1 (the Twiggy timing track) or 0-45 (the normal tracks), so we need to clamp it to that range
+                if (rawTrack < -1) {
+                    trackParams.currentTrack = -1;
                 } else if (rawTrack > 45) {
                     trackParams.currentTrack = 45;
                 } else {
@@ -307,6 +306,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                 prevRawTrack = rawTrack;
 
                 // If the track has changed, but the step hasn't completed yet, then we need to try to start the SD card task with the appropriate read/write operation
+                // Note that we don't guard this with a check for the track being >= 0 because a -1 timing track read/write will get auto-rejected by the SD task
                 if (trackParams.trackChanged && !trackLoaded) {
                     if (!trackParams.pendingDispatch) {
                         // If a dispatch to the SD task isn't already pending, then we can set up a pending one with the current seek

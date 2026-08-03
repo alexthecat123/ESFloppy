@@ -9,7 +9,38 @@
 
 #define SEEK_LEADIN_SECTORS 5 // How many sectors before sector 0 to reset the sector counter to when seeking to a new track
 
+#define TWIGGY_SECTOR_LENGTH 780 // The length of a base Twiggy sector in GCR bytes; it's a bit shorter than a Sony one since there are fewer sync bytes
+
 static char debugString[MAX_DEBUG_STRING_LENGTH]; // A string buffer for sending debug messages to the SD card task for printing over serial
+
+// The target track length (in GCR bytes) for one revolution, indexed by [side][carriage position]
+// This is used to pad out each track with sync bytes so that the Lisa sees the revolution length it expects
+// Which doesn't matter for Sony, but does for Twiggy because it times the disk during formatting
+// Index 46 is the timing track at carriage position -1
+uint32_t targetTrackLength[2][47] = {
+    { // Side 0 (upper/rear head); carriage position holds track 45 - T
+         11715,  11715,  11715,  11715,  12496,  12496, // Carriage 0-5, track 45-40
+         12496,  12496,  12496,  12496,  12496,  13276, // Carriage 6-11, track 39-34
+         13276,  13276,  13276,  13276,  13276,  14057, // Carriage 12-17, track 33-28
+         14057,  14057,  14057,  14057,  14057,  14837, // Carriage 18-23, track 27-22
+         14837,  14837,  14837,  14837,  14837,  15617, // Carriage 24-29, track 21-16
+         15617,  15617,  15617,  15617,  15617,  16397, // Carriage 30-35, track 15-10
+         16397,  16397,  16397,  16397,  16397,  16397, // Carriage 36-41, track 9-4
+         17177,  17177,  17177,  17177,                 // Carriage 42-45, track 3-0
+         11781                                          // Carriage -1, the side of the timing track that gets 14/15 sectors
+    },
+    { // Side 1 (lower/front head); carriage position holds track T
+         17177,  17177,  17177,  17177,  16397,  16397, // Carriage 0-5, track 45-40
+         16397,  16397,  16397,  16397,  16397,  15617, // Carriage 6-11, track 39-34
+         15617,  15617,  15617,  15617,  15617,  14837, // Carriage 12-17, track 33-28
+         14837,  14837,  14837,  14837,  14837,  14057, // Carriage 18-23, track 27-22
+         14057,  14057,  14057,  14057,  14057,  13276, // Carriage 24-29, track 21-16
+         13276,  13276,  13276,  13276,  13276,  12496, // Carriage 30-35, track 15-10
+         12496,  12496,  12496,  12496,  12496,  12496, // Carriage 36-41, track 9-4
+         11715,  11715,  11715,  11715,                 // Carriage 42-45, track 3-0
+         17178                                          // Carriage -1, the side of the timing track that gets 21 sectors
+    }
+};
 
 // This struct is used to store a sector that we've received from the Lisa, but that we can't write to the track buffer yet because it's in use by the SD task
 struct SectorStashEntry {
@@ -17,6 +48,10 @@ struct SectorStashEntry {
     uint32_t gpio; // The state of the GPIO pins when we got the sector; used to determine the side number from HDS in certain cases
     uint8_t data[704]; // The actual sector data itself
 };
+
+// This is used for writes to Twiggy track -1, which can be written with different numbers of sectors
+// And we need to be able to keep track of how many sectors are actually written to the track at any given time
+uint32_t sectorAccumulator[2] = {0, 0};
 
 // This function gets called whenever the Lisa tries to read data from the floppy drive
 // It checks if it's time to send out a new flux transition, and if so, it bit-bangs it out on the RDA pin
@@ -29,15 +64,22 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
     // We'll use this variable to keep track of how long it's been since we sent the last bit
     static uint32_t prevBitTime = 0;
 
-    static uint32_t currentSector = 0; // The sector that we're currently sending data for
-    static uint32_t inSectorIndex = 0; // How many bits of that sector we've sent so far
-
-    // The number of sectors per track for both sides of the current track based on the drive type
-    static uint32_t sectorsPerTrack[2] = {0, 0};
-
-    // Grab the side number from the low HDS bit; we'll need it for a lot of stuff here in a moment
+        // Grab the side number from the low HDS bit; we'll need it for a lot of stuff here in a moment
     uint32_t gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register
     uint32_t side = (gpioIn & 1 << HDS) ? 1 : 0;
+
+    static uint32_t currentSector = 0; // The sector that we're currently sending data for
+    // How many bits of that sector we've sent so far; for a Sony it always starts at 0
+    // But for a Twiggy we start a few bits into the sector because we cut off some of the sync bytes at the start to make it TWIGGY_SECTOR_LENGTH bytes long
+    static uint32_t inSectorIndex = 0;
+
+    // The number of sectors per track for both sides of the current track based on the drive type
+    // Init this to 1 instead of 0 to avoid a divide by zero error, which could happen if we haven't received any headers yet
+    // On the line: currentSector = (currentSector + (inSectorIndex / BITS_PER_SECTOR)) % sectorsPerTrack[side];
+    static uint32_t sectorsPerTrack[2] = {1, 1};
+
+    // Whether or not we're in the process of sending padding sync bytes to the end of a Twiggy track to make it the right length
+    static bool paddingSync = false;
 
     // On a real drive, the disk doesn't stop turning just because we exited transmitTrack
     // So if the Lisa exits transmitTrack to check status and reenters, we need to catch up to the current time to simulate the spinning disk
@@ -60,6 +102,10 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         inSectorIndex += timeAway / 480; // Increment the in-sector index by the number of full bit times that have passed
         // But if this pushes it past the end of the sector, then we have even more work to do
         if (inSectorIndex >= BITS_PER_SECTOR) {
+            // Increment inSectorIndex by the Twiggy offset to skip some of the sync bytes if we're emulating a Twiggy
+            if (metadata->driveType == DriveTwiggy) {
+                inSectorIndex += ((sizeof(trackBufferGCR[side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3));
+            }
             // Increment the current sector by the number of full sectors that have passed, wrapping around to sector 0 if necessary
             currentSector = (currentSector + (inSectorIndex / BITS_PER_SECTOR)) % sectorsPerTrack[side];
             inSectorIndex %= BITS_PER_SECTOR; // And then set the in-sector index to the appropriate spot within the new sector
@@ -75,8 +121,16 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
             sectorsPerTrack[1] = sectorsPerTrack[0];
         } else {
             // But on a Twiggy, we have to do it for both sides because they each have a different number of sectors
-            sectorsPerTrack[0] = sectorsPerTrackTwiggy[45 - trackParams->currentTrack]; // Side 0's (upper/rear head) track is (45 - carriage position)
-            sectorsPerTrack[1] = sectorsPerTrackTwiggy[trackParams->currentTrack]; // And side 1's (lower/front head) is the carriage position
+            // And only do this is we're reading a real track though; if we're reading Twiggy timing track -1, then we don't know how many sectors it has
+            if (trackParams->currentTrack >= 0) {
+                sectorsPerTrack[0] = sectorsPerTrackTwiggy[45 - trackParams->currentTrack]; // Side 0's (upper/rear head) track is (45 - carriage position)
+                sectorsPerTrack[1] = sectorsPerTrackTwiggy[trackParams->currentTrack]; // And side 1's (lower/front head) is the carriage position
+            } else {
+                // On the Twiggy timing track -1, which can have a variable number of sectors, sectorsPerTrack is the sectorAccumulator
+                // As we did earlier, avoid a divide by zero by ensuring that sectorsPerTrack is at least 1 for both sides
+                sectorsPerTrack[0] = (sectorAccumulator[0] > 0) ? sectorAccumulator[0] : 1;
+                sectorsPerTrack[1] = (sectorAccumulator[1] > 0) ? sectorAccumulator[1] : 1;
+            }
         }
         // Now we need to reset the in-sector index and current sector to 0 and not do a catch-up
         // This isn't necessary, but it speeds things up since the FDC normally starts reading new tracks from sector 0, so might as well start there
@@ -96,7 +150,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         }
         // Once we know where it is, we can set the current sector to SEEK_LEADIN_SECTORS before it, wrapping around if necessary
         currentSector = (sector0Slot + sectorsPerTrack[side] - SEEK_LEADIN_SECTORS) % sectorsPerTrack[side];
-        inSectorIndex = 0; // And reset the in-sector index to 0 as well
+        // And reset the in-sector index to the start of the sector as well
+        // For a Sony, this is index 0, but for a Twiggy, we cut off some of the sync bytes to make the sectors shorter
+        inSectorIndex = (metadata->driveType == DriveTwiggy) ? ((sizeof(trackBufferGCR[side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) : 0;
         prevBitTime = currentTime; // Set the previous time to now
         trackParams->trackChanged = false; // Finally, mark that we've handled the track change
     }
@@ -130,14 +186,39 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         // Otherwise, grab the side number from the low HDS bit and continue
         side = (gpioIn & 1 << HDS) ? 1 : 0;
 
+        if (metadata->driveType == DriveTwiggy && trackParams->currentTrack < 0) {
+            // If we're on a Twiggy and the current track is -1 (the timing track), then we need to update sectorsPerTrack to the current number of sectors written to the track
+            // It could be written with any number of sectors right now, and we need to reflect that instead of only updating it when the track changes
+            // Avoid a divide by zero by ensuring that sectorsPerTrack is at least 1 for both sides
+            sectorsPerTrack[0] = (sectorAccumulator[0] > 0) ? sectorAccumulator[0] : 1;
+            sectorsPerTrack[1] = (sectorAccumulator[1] > 0) ? sectorAccumulator[1] : 1;
+        }
+
         // When we arrive here, we'll be on the first half of a bit, so go ahead and prep that bit to be sent out on RDA
         // We need to extract the bit from trackBufferGCR[side][currentSector]
         // But there's a catch: trackBufferGCR may not be ready yet if the SD task on the other core is still running
         // So we need to wait until it's finished before we read the track buffer and just send out the FF sync pattern until then
         // The Lisa won't care; it'll just think that the disk hasn't spun around to the next sector yet and will patiently wait for us
+        // There's another case where we need to do this too: On a Twiggy when the track isn't as long as it should be
+        // Twiggy expects tracks to be a certain length, and if they aren't then formatting will fail
+        // And our tracks are shorter than that because we cut off sync bytes at the end of the track
+        // So we need to pad it out when we're done sending all the track data out to make it the right length
+        static uint32_t targetLength = 0;
+        static uint32_t paddingLength = 0;
+        if (metadata->driveType == DriveTwiggy && currentSector == 0 && (inSectorIndex == (sizeof(trackBufferGCR[0][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) && !paddingSync) {
+            // If we just ran out of data, figure out how long the Twiggy track should be based on the current track/side
+            // We have a LUT for this, so just look it up; LUT index 46 is the timing track at -1
+            targetLength = targetTrackLength[side][(trackParams->currentTrack < 0) ? 46 : trackParams->currentTrack];
+            // And that padding length is just that minus the length of all the sectors that we just sent out
+            // Multiplied by 8 to convert from bytes to bits since inSectorIndex is in bits
+            // Don't bother with any padding if the track is already the right length or longer than it should be
+            paddingLength = (targetLength > (sectorsPerTrack[side] * TWIGGY_SECTOR_LENGTH)) ? ((targetLength - (sectorsPerTrack[side] * TWIGGY_SECTOR_LENGTH)) << 3) : 0;
+            // And set paddingSync to true so that we know to send out sync bytes until we reach the target length
+            paddingSync = true;
+        }
         static const uint8_t syncPattern[5] = {0xFF, 0x3F, 0xCF, 0xF3, 0xFC};
         uint8_t currentByte;
-        if (sdTaskInterface->finished && !trackParams->pendingDispatch) {
+        if ((sdTaskInterface->finished && !trackParams->pendingDispatch) && !paddingSync) {
             // If the SD task is finished AND we're not waiting for a pending dispatch (meaning that trackBufferGCR is up to date), then we can sedn out the next bit from the track buffer
             // Make sure we don't go out of bounds if the side changed in the middle of this track
             // If it did and this is a Twiggy, there's a chance that the current sector is now out of bounds for the new sidee
@@ -145,8 +226,20 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
             uint32_t slot = (currentSector < sectorsPerTrack[side]) ? currentSector : 0;
             currentByte = ((uint8_t*)&trackBufferGCR[side][slot])[inSectorIndex >> 3]; // Get the byte that contains the bit we want
         } else {
-            // If the SD task is not finished, then we need to send out the sync pattern
+            // If the SD task is not finished or if we nede to pad a Twiggy track, then we need to send out the sync pattern
             currentByte = syncPattern[(inSectorIndex >> 3) % 5];
+            // If we're padding a Twiggy track, then decrement the padding length
+            if (paddingSync) {
+                paddingLength--;
+                currentSector = 0; // Make sure that currentSector isn't blowing up while we're padding
+                if (paddingLength == 0) {
+                    // If we've sent out all the padding bytes, then we're done with the padding and can reset the paddingSync flag
+                    paddingSync = false;
+                    // Clear the in-sector index so that the sector 0 we're about to send out starts at the beginning
+                    inSectorIndex = (sizeof(trackBufferGCR[0][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3);
+                    currentSector = 0; // And currentSector too
+                }
+            }
         }
         bool bit = (currentByte >> (7 - (inSectorIndex & 0x07))) & 0x01; // Extract the bit we want from the byte
 
@@ -169,15 +262,17 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         // We don't need to retrieve the bit again and check its value because regardless of whether it was a 0 or a 1, we need to set it high!
         writeRDA(true); // Nice and easy!
         
-        // We now need to increment to the next bit in the sector
+        // We now need to increment to the next bit in the sector, but only if we're not padding a Twiggy track
         inSectorIndex++;
-        if (inSectorIndex >= BITS_PER_SECTOR) {
+        if (!paddingSync && inSectorIndex >= BITS_PER_SECTOR) {
             // If we're about to go past the end of the sector, we need to move to the next one
             currentSector++;
             if (currentSector >= sectorsPerTrack[side]) {
                 currentSector = 0; // Or wrap back to sector 0 if we're at the end of the track
             }
-            inSectorIndex = 0; // Don't forget to reset the in-sector index since we're starting a new sector
+            // Don't forget to reset the in-sector index since we're starting a new sector
+            // Same as before, this is 0 for a Sony, but we cut off some of the sync bytes for a Twiggy
+            inSectorIndex = (metadata->driveType == DriveTwiggy) ? ((sizeof(trackBufferGCR[side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) : 0;
         }
         // If we're emulating a Twiggy, then return back to the main loop after every bit so that we can do some housekeeping stuff
         if (metadata->driveType == DriveTwiggy) {
@@ -270,6 +365,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
     bool prevWRD = REG_READ(GPIO_IN_REG) & (1 << WRD); // This will hold the previous state of WRD so that we can detect edges
     bool currWRD = prevWRD; // And the current state
 
+    // This tells us the first sector that was written in Twiggy track -1, so that we can use it to determine whether or not we need to reset the sector accumulator
+    static uint32_t firstSectorWritten[2] = {0, 0};
+
     // Get the number of sectors per track for both sides of the current track based on the drive type
     uint32_t sectorsPerTrack[2] = {0, 0};
     if (metadata->driveType == Drive400 || metadata->driveType == Drive800) {
@@ -278,8 +376,16 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         sectorsPerTrack[1] = sectorsPerTrack[0];
     } else {
         // But on a Twiggy, we have to do it for both sides because they each have a different number of sectors
-        sectorsPerTrack[0] = sectorsPerTrackTwiggy[45 - trackParams->currentTrack]; // Side 0's (upper/rear head) track is (45 - carriage position)
-        sectorsPerTrack[1] = sectorsPerTrackTwiggy[trackParams->currentTrack]; // And side 1's (lower/front head) is the carriage position
+        // And only do this is we're reading a real track though; if we're reading Twiggy timing track -1, then we don't know how many sectors it has
+        if (trackParams->currentTrack >= 0) {
+            sectorsPerTrack[0] = sectorsPerTrackTwiggy[45 - trackParams->currentTrack]; // Side 0's (upper/rear head) track is (45 - carriage position)
+            sectorsPerTrack[1] = sectorsPerTrackTwiggy[trackParams->currentTrack]; // And side 1's (lower/front head) is the carriage position
+        } else {
+            // On the Twiggy timing track -1, which can have a variable number of sectors, sectorsPerTrack is the sectorAccumulator
+            // As we did earlier, avoid a divide by zero by ensuring that sectorsPerTrack is at least 1 for both sides
+            sectorsPerTrack[0] = (sectorAccumulator[0] > 0) ? sectorAccumulator[0] : 1;
+            sectorsPerTrack[1] = (sectorAccumulator[1] > 0) ? sectorAccumulator[1] : 1;
+        }
     }
 
     // This buffer will hold the raw WRD data that we're currently receiving from the Lisa, and we'll use it like a shift register
@@ -305,6 +411,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
     static uint32_t prevFormat = 0; // And the format byte
 
     static uint32_t lostSectorCount = 0; // The number of sectors that we've lost because the stash overflowed
+
+    // This is the last slot that we wrote a header to for each side; used to determine where to write the data during a Twiggy track -1 format
+    static uint32_t prevSlot[2] = {0, 0};
 
     gpioData = REG_READ(GPIO_IN_REG); // Read the GPIO input register to get the current state of WRD and WRQ
 
@@ -386,9 +495,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
                     // This points to data corruption, so there's no point in continuing to receive data
                     // Just return and let the Lisa retry the write if it feels like it
                     lastWriteWasHeader = false; // Make sure to reset this so that we don't try to use a header that's stale
-                    interrupts();
-                    Serial.println("MORE THAN 6US");
-                    noInterrupts();
+                    snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "ERROR: More than 6us between edges on WRD! Time since last edge: %dus\n", (currTime - prevTime) / 240);
+                    debugPrint(debugString, strlen(debugString));
                     return;
                 }
             }
@@ -469,25 +577,37 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         // We don't have to do this manually anymore; now we have our fancy getInterleaveTable function that does it for us
         // False tells it to use the format from the currentFormat byte instead of the metadata
         InterleaveTable interleaveTable = getInterleaveTable(metadata, currentFormat, false);
-        // Iterate through each sector in the current track
-        for (uint32_t i = 0; i < sectorsPerTrack[sideNum]; i++) {
-            if (interleaveTable[sectorsPerTrack[sideNum]][i] == sectorNum) {
-                slot = i;
-                break;
+        // If we're doing a Twiggy timing track -1 write, then we need to use the prevSlot set by the last header to determine which slot to write to
+        if (trackParams->currentTrack == -1 && lastWriteWasHeader) {
+            slot = prevSlot[sideNum];
+        } else {
+            // Otherwise, iterate through each sector in the current track
+            for (uint32_t i = 0; i < sectorsPerTrack[sideNum]; i++) {
+                // And use the interleave table to map the logical sector number to a physical slot in trackBufferGCR
+                if (interleaveTable[sectorsPerTrack[sideNum]][i] == sectorNum) {
+                    slot = i;
+                    break;
+                }
             }
         }
         // Now that we've used it, reset lastWriteWasHeader to false so that we don't accidentally use a stale header for the next data write if we end up aborting right now
         lastWriteWasHeader = false;
         if (slot == 0xFFFFFFFF) {
             // If we didn't find a valid slot, then something went wrong (perhaps a corrupted header), so just abort
-            interrupts();
-            Serial.println("NO VALID DATASLOT");
-            noInterrupts();
+            snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "ERROR: Couldn't find a valid write slot for sector %d on side %d with format %d\n", sectorNum, sideNum, currentFormat);
+            debugPrint(debugString, strlen(debugString));
             return;
+        } else if (slot >= 22) {
+            return; // If the slot is greater than 22, then it's out of bounds of trackBufferGCR, so return
         }
+
         // Now copy the 704 bytes of data into the proper GcrSector, using the slot we just found as the physical sector number
         memcpy(&trackBufferGCR[sideNum][slot].sector_again, &dataBuffer[0], 704);
-        trackParams->dirty = true; // Don't forget to set dirty to true so that we know to write the track back to the disk image later
+        // And mark that the track is dirty so that we know to write it back to the disk image later
+        // But ONLY if it's not the Twiggy timing track -1, since that track just gets discarded after we use it
+        if (trackParams->currentTrack >= 0) {
+            trackParams->dirty = true;
+        }
     } else if (writeState == HEADER) {
         // If this is a header write, then we need to copy the 4 bytes of header data and the 1-byte header checksum into the proper GcrSector
         // And we'll actually update the format byte and checksum in ALL of the sectors, not just the one we're writing to, to make sure it's always consistent across the whole track
@@ -497,44 +617,79 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         validGCR = gcr_8to6[dataBuffer[0]] | gcr_8to6[dataBuffer[1]] | gcr_8to6[dataBuffer[2]] | gcr_8to6[dataBuffer[3]] | gcr_8to6[dataBuffer[4]];
         if (validGCR & 0xC0) {
             // If any of the bytes have a 1 in the top 2 bits, then it's not valid GCR and we need to abort
-            interrupts();
-            Serial.println("BAD HEADER GCR");
-            noInterrupts();
+            snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "ERROR: Write sector header contains invalid GCR bytes!\n");
+            debugPrint(debugString, strlen(debugString));
             return;
         }
-        // Now make sure that the new track number in the header matches currentTrack
-        // If it doesn't, then either the Lisa is going crazy or we missed a seek, but either way we need to abort
-        // The track number encoding differs between Sony and Twiggy drives, so reconstruct it according to drive type
-        uint32_t trackNum = metadata->driveType == DriveTwiggy ? (gcr_8to6[dataBuffer[0]]) : (gcr_8to6[dataBuffer[0]] | ((gcr_8to6[dataBuffer[2]] & 1) << 6));
-        if (trackNum != trackParams->currentTrack) {
-            interrupts();
-            Serial.println("HEADER TRACK MISMATCH");
-            noInterrupts();
-            return;
-        }
-        uint32_t sectorNum = gcr_8to6[dataBuffer[1]]; // The second byte of the data buffer is the sector number
+
         // We can read the side number from hiTrackSide in the new header instead of HDS this time; just make sure to use the proper format for Sony vs Twiggy
         uint32_t sideNum = metadata->driveType == DriveTwiggy ? (gcr_8to6[dataBuffer[2]]) : ((gcr_8to6[dataBuffer[2]] & (1 << 5)) ? 1 : 0);
         prevSideNum = sideNum; // Store the side number for the next data write in this format op
-        prevFormat = gcr_8to6[dataBuffer[3]]; // And store the format for the next data write in this format op
+        // Now make sure that the new track number in the header matches currentTrack
+        // If it doesn't, then either the Lisa is going crazy or we missed a seek, but either way we need to abort
+        // The track number encoding differs between Sony and Twiggy drives, so reconstruct it according to drive type
+        int32_t headerTrack = gcr_8to6[dataBuffer[0]];
+        int32_t headerCarriagePos;
+        if (metadata->driveType == DriveTwiggy) {
+            // On Twiggy, the track number stored in the header is given relative to its side, so it's NOT a carriage position
+            // Convert it to a carriage position to get it into the same frame of reference as currentTrack, taking the 0x3F track -1 case into account too 
+            headerCarriagePos = (headerTrack == 0x3F) ? -1 : (sideNum == 0) ? (45 - headerTrack) : headerTrack;
+        } else {
+            // On Sony, the track number and carriage position are the same thing, so just use it directly
+            // Don't forget that the high bit of the Sony track number is stored in hiTrackSide though
+            headerCarriagePos = headerTrack | ((gcr_8to6[dataBuffer[2]] & 1) << 6);
+        }
+        // And now that the track number truly reflects which track we're on, we can check to make sure that the track number matches currentTrack
+        if (headerCarriagePos != trackParams->currentTrack) {
+            snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "ERROR: Header write track mismatch; expected %d, got %d\n", trackParams->currentTrack, headerCarriagePos);
+            debugPrint(debugString, strlen(debugString));
+            return;
+        }
+        uint32_t sectorNum = gcr_8to6[dataBuffer[1]]; // The second byte of the data buffer is the sector number
+        prevFormat = gcr_8to6[dataBuffer[3]]; // Store the format for the next data write in this format op
         // As we did for the data write, we need to map the logical sector number to a physical slot using the appropriate interleave table
         // The nice part here is that we ALWAYS have a valid format byte to use (stored in prevFormat right above), so no need to worry about where to get the format byte from
+        // One other nuance though: we need to reset the sectorAccumulator here if this header is the same as firstSectorWritten
+        // This would indicate that the Lisa is reformatting the track from the beginning again, so we need to start the accumulator over too
+        // Also reset it to 0 on any track that's not Twiggy timing track -1, since we know they have a fixed number of sectors anyway
+        if (trackParams->currentTrack != -1 || sectorNum == firstSectorWritten[sideNum]) {
+            sectorAccumulator[sideNum] = 0; // Reset the sectorAccumulator to 0 since we're starting over
+        }
+        // We also need to update firstSectorWritten if this is the first header we've seen for this track
+        if (sectorAccumulator[sideNum] == 0) {
+            firstSectorWritten[sideNum] = sectorNum;
+        }
         // Aside from that, it's literally the exact same logic as for the data write, so nothing else to say here
         uint32_t slot = 0xFFFFFFFF;
         InterleaveTable interleaveTable = getInterleaveTable(metadata, prevFormat, false);
-        for (uint32_t i = 0; i < sectorsPerTrack[sideNum]; i++) {
-            if (interleaveTable[sectorsPerTrack[sideNum]][i] == sectorNum) {
-                slot = i;
-                break;
+        if (trackParams->currentTrack == -1) {
+            // If we're on the Twiggy timing track, we can't use the interleave LUT because it won't work for all sector per track values
+            // So just take advantage of the fact that headers always arrive in slot order during the format op
+            slot = sectorAccumulator[sideNum];
+        } else {
+            // Otherwise, use the interleave LUT to find the physical slot for this logical sector number
+            for (uint32_t i = 0; i < sectorsPerTrack[sideNum]; i++) {
+                if (interleaveTable[sectorsPerTrack[sideNum]][i] == sectorNum) {
+                    slot = i;
+                    break;
+                }
             }
         }
         if (slot == 0xFFFFFFFF) {
             // Abort on an invalid slot as before
-            interrupts();
-            Serial.println("NO VALID HEADERSLOT");
-            noInterrupts();
+            snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "ERROR: Couldn't find a valid header write slot for sector %d on side %d\n", sectorNum, sideNum);
+            debugPrint(debugString, strlen(debugString));
             return;
+        } else if (slot >= 22) {
+            return; // If the slot is greater than 22, then it's out of bounds of trackBufferGCR, so return
         }
+
+        prevSlot[sideNum] = slot; // Store the slot for the next data write if this is a Twiggy track -1 format op
+
+        // Now that we have a valid slot for the header and we know that everything about it is valid, increment the sectorAccumulator
+        // Remember, this is only used on Twiggy timing track -1, which can have a variable number of sectors depending on how it's formatted
+        sectorAccumulator[sideNum]++;
+
         // Now write our data to the sector headers using the physical slot number we just found
         for (uint32_t i = 0; i < sectorsPerTrack[sideNum]; i++) {
             trackBufferGCR[sideNum][i].format = dataBuffer[3]; // Update the format byte for all sectors on this side of the track
@@ -544,6 +699,10 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         // And then memcpy over the full sector header for the particular sector that we just wrote to
         memcpy(&trackBufferGCR[sideNum][slot].loTrack, &dataBuffer[0], 5);
         lastWriteWasHeader = true; // Mark that the last write was a header
-        trackParams->dirty = true; // Once again, make sure to indicate that this track needs to be written back
+        // And mark that the track is dirty so that we know to write it back to the disk image later
+        // But ONLY if it's not the Twiggy timing track -1, since that track just gets discarded after we use it
+        if (trackParams->currentTrack >= 0) {
+            trackParams->dirty = true;
+        }
     }
 }
