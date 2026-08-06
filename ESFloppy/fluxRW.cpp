@@ -45,6 +45,8 @@ uint32_t targetTrackLength[2][47] = {
 // This struct is used to store a sector that we've received from the Lisa, but that we can't write to the track buffer yet because it's in use by the SD task
 struct SectorStashEntry {
     WriteState state; // The state of the sector (whether it's a header or data)
+    int32_t track; // The track number that the sector belongs to
+    uint32_t drive; // The drive number that the sector belongs to
     uint32_t gpio; // The state of the GPIO pins when we got the sector; used to determine the side number from HDS in certain cases
     uint8_t data[704]; // The actual sector data itself
 };
@@ -57,16 +59,12 @@ uint32_t sectorAccumulator[2] = {0, 0};
 // It checks if it's time to send out a new flux transition, and if so, it bit-bangs it out on the RDA pin
 // For the sake of speed, we don't return from here until the Lisa stops reading from the drive
 // We need speed here, so make sure to stick it in IRAM and optimize it as much as possible
-__attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackBufferGCR[2][22], volatile SdTaskInterface *sdTaskInterface, TrackParams* trackParams, DiskImageMetadata* metadata) {
+__attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackBufferGCR[2][22], volatile SdTaskInterface *sdTaskInterface, TrackParams* trackParams, BufferStatus* bufferStatus, DiskImageMetadata* metadata) {
     // Each bit time is 2us long; for a 1 bit, we send a falling edge at the start, followed by a rising edge 1us later
     // For a 0 bit, we just keep it high the whole time
 
     // We'll use this variable to keep track of how long it's been since we sent the last bit
     static uint32_t prevBitTime = 0;
-
-        // Grab the side number from the low HDS bit; we'll need it for a lot of stuff here in a moment
-    uint32_t gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register
-    uint32_t side = (gpioIn & 1 << HDS) ? 1 : 0;
 
     static uint32_t currentSector = 0; // The sector that we're currently sending data for
     // How many bits of that sector we've sent so far; for a Sony it always starts at 0
@@ -80,6 +78,10 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
 
     // Whether or not we're in the process of sending padding sync bytes to the end of a Twiggy track to make it the right length
     static bool paddingSync = false;
+
+    // Whether or not the track buffer currently contains data that's valid to send out for the current track/drive
+    // We need to latch this instead of repeatedly recomputing it because we don't want to switch from sending sync bytes to valid data in the middle of a sector; that would cause read errors
+    static bool trackBufferValid = false;
 
     // On a real drive, the disk doesn't stop turning just because we exited transmitTrack
     // So if the Lisa exits transmitTrack to check status and reenters, we need to catch up to the current time to simulate the spinning disk
@@ -104,11 +106,14 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         if (inSectorIndex >= BITS_PER_SECTOR) {
             // Increment inSectorIndex by the Twiggy offset to skip some of the sync bytes if we're emulating a Twiggy
             if (metadata->driveType == DriveTwiggy) {
-                inSectorIndex += ((sizeof(trackBufferGCR[side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3));
+                inSectorIndex += ((sizeof(trackBufferGCR[trackParams->side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3));
             }
             // Increment the current sector by the number of full sectors that have passed, wrapping around to sector 0 if necessary
-            currentSector = (currentSector + (inSectorIndex / BITS_PER_SECTOR)) % sectorsPerTrack[side];
+            currentSector = (currentSector + (inSectorIndex / BITS_PER_SECTOR)) % sectorsPerTrack[trackParams->side];
             inSectorIndex %= BITS_PER_SECTOR; // And then set the in-sector index to the appropriate spot within the new sector
+            // And finally, update the buffer valid flag to reflect whether the track buffer is valid now that we're entering a new sector
+            // It's valid if all SD card ops have finished and the current drive owns the buffer
+            trackBufferValid = sdTaskInterface->finished && !trackParams->pendingDispatch && (bufferStatus->bufferOwnerDrive == trackParams->drive);
         }
         prevBitTime = currentTime; // And finally, update the previous time to now
     } else if (trackParams->trackChanged == true) {
@@ -142,49 +147,41 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         InterleaveTable interleaveTable = getInterleaveTable(metadata, 0, true);
         uint32_t sector0Slot = 0;
         // And now scan through the interleave table to find out which slot sector 0 is in
-        for (uint32_t i = 0; i < sectorsPerTrack[side]; i++) {
-            if (interleaveTable[sectorsPerTrack[side]][i] == 0) {
+        for (uint32_t i = 0; i < sectorsPerTrack[trackParams->side]; i++) {
+            if (interleaveTable[sectorsPerTrack[trackParams->side]][i] == 0) {
                 sector0Slot = i;
                 break;
             }
         }
         // Once we know where it is, we can set the current sector to SEEK_LEADIN_SECTORS before it, wrapping around if necessary
-        currentSector = (sector0Slot + sectorsPerTrack[side] - SEEK_LEADIN_SECTORS) % sectorsPerTrack[side];
+        currentSector = (sector0Slot + sectorsPerTrack[trackParams->side] - SEEK_LEADIN_SECTORS) % sectorsPerTrack[trackParams->side];
         // And reset the in-sector index to the start of the sector as well
         // For a Sony, this is index 0, but for a Twiggy, we cut off some of the sync bytes to make the sectors shorter
-        inSectorIndex = (metadata->driveType == DriveTwiggy) ? ((sizeof(trackBufferGCR[side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) : 0;
+        inSectorIndex = (metadata->driveType == DriveTwiggy) ? ((sizeof(trackBufferGCR[trackParams->side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) : 0;
+        paddingSync = false; // Get out of the padding state if we were previously in it
+
+        // Update the buffer valid flag to reflect whether the track buffer is valid for the new track/drive
+        // It's valid if all SD card ops have finished and the current drive owns the buffer
+        trackBufferValid = sdTaskInterface->finished && !trackParams->pendingDispatch && (bufferStatus->bufferOwnerDrive == trackParams->drive);
+
         prevBitTime = currentTime; // Set the previous time to now
         trackParams->trackChanged = false; // Finally, mark that we've handled the track change
     }
 
     while (1) {
         // Before we do anything, we need to check to see if the Lisa is still listening to us to begin with
-        // "Listening to us" looks different on a Sony versus on a Twiggy
-        // For the sake of speed, do a raw REG_READ here instead of using any helper functions
-        gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register
-        if (metadata->driveType == DriveTwiggy) {
-            // On a Twiggy, the Lisa is always listening to us on RDA as long as the drive is enabled and the motor is on
-            if (!(!(gpioIn & (1 << DR1)) && trackParams->motorOn)) {
-                // If either of those conditions are not met, then the Lisa is no longer listening to us, so we need to exit
-                return;
-            }
-        } else {
+        // This doesn't matter for Twiggy because this loop returns after every bit
+        // But on Sony it doesn't, so we need an exit condition
+        if (metadata->driveType == Drive400 || metadata->driveType == Drive800) {
             // On a Sony, the Lisa is listening if it's accessing read registers 8 or 9
             // We don't care about the low side select bit; we just need to make sure the high 3 bits {PH2, PH1, PH0} are 100
             // And we also need to be sure that LSTRB (PH3) isn't high; if it is, then we might miss a write to regs 0 or 1 which look like regs 8 and 9 in write mode
+            uint32_t gpioIn = REG_READ(GPIO_IN_REG);
             if (!(gpioIn & 1 << PH2 && !(gpioIn & 1 << PH1) && !(gpioIn & 1 << PH0)) || (gpioIn & 1 << PH3)) {
                 // If not, then return
                 return;
             }
         }
-        // We also need to check to see if WRQ went low, meaning that the Lisa is trying to write to the drive
-        if (!(gpioIn & 1 << WRQ)) {
-            // If so, then get out of here and let the write handler (receiveSector) take over
-            return;
-        }
-
-        // Otherwise, grab the side number from the low HDS bit and continue
-        side = (gpioIn & 1 << HDS) ? 1 : 0;
 
         if (metadata->driveType == DriveTwiggy && trackParams->currentTrack < 0) {
             // If we're on a Twiggy and the current track is -1 (the timing track), then we need to update sectorsPerTrack to the current number of sectors written to the track
@@ -208,23 +205,26 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         if (metadata->driveType == DriveTwiggy && currentSector == 0 && (inSectorIndex == (sizeof(trackBufferGCR[0][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) && !paddingSync) {
             // If we just ran out of data, figure out how long the Twiggy track should be based on the current track/side
             // We have a LUT for this, so just look it up; LUT index 46 is the timing track at -1
-            targetLength = targetTrackLength[side][(trackParams->currentTrack < 0) ? 46 : trackParams->currentTrack];
+            targetLength = targetTrackLength[trackParams->side][(trackParams->currentTrack < 0) ? 46 : trackParams->currentTrack];
             // And that padding length is just that minus the length of all the sectors that we just sent out
             // Multiplied by 8 to convert from bytes to bits since inSectorIndex is in bits
             // Don't bother with any padding if the track is already the right length or longer than it should be
-            paddingLength = (targetLength > (sectorsPerTrack[side] * TWIGGY_SECTOR_LENGTH)) ? ((targetLength - (sectorsPerTrack[side] * TWIGGY_SECTOR_LENGTH)) << 3) : 0;
+            paddingLength = (targetLength > (sectorsPerTrack[trackParams->side] * TWIGGY_SECTOR_LENGTH)) ? ((targetLength - (sectorsPerTrack[trackParams->side] * TWIGGY_SECTOR_LENGTH)) << 3) : 0;
             // And set paddingSync to true so that we know to send out sync bytes until we reach the target length
-            paddingSync = true;
+            // Only if there's actual padding to send though
+            if (paddingLength > 0) {
+                paddingSync = true;
+            }
         }
         static const uint8_t syncPattern[5] = {0xFF, 0x3F, 0xCF, 0xF3, 0xFC};
         uint8_t currentByte;
-        if ((sdTaskInterface->finished && !trackParams->pendingDispatch) && !paddingSync) {
-            // If the SD task is finished AND we're not waiting for a pending dispatch (meaning that trackBufferGCR is up to date), then we can sedn out the next bit from the track buffer
+        if (trackBufferValid && !paddingSync) {
+            // If the buffer is valid and we're not padding a Twiggy track, then we can send out the actual data from the track buffer
             // Make sure we don't go out of bounds if the side changed in the middle of this track
             // If it did and this is a Twiggy, there's a chance that the current sector is now out of bounds for the new sidee
             // In which case we just reset to slot 0 in the GCR buffer again
-            uint32_t slot = (currentSector < sectorsPerTrack[side]) ? currentSector : 0;
-            currentByte = ((uint8_t*)&trackBufferGCR[side][slot])[inSectorIndex >> 3]; // Get the byte that contains the bit we want
+            uint32_t slot = (currentSector < sectorsPerTrack[trackParams->side]) ? currentSector : 0;
+            currentByte = ((uint8_t*)&trackBufferGCR[trackParams->side][slot])[inSectorIndex >> 3]; // Get the byte that contains the bit we want
         } else {
             // If the SD task is not finished or if we nede to pad a Twiggy track, then we need to send out the sync pattern
             currentByte = syncPattern[(inSectorIndex >> 3) % 5];
@@ -238,6 +238,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
                     // Clear the in-sector index so that the sector 0 we're about to send out starts at the beginning
                     inSectorIndex = (sizeof(trackBufferGCR[0][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3);
                     currentSector = 0; // And currentSector too
+                    // This is another opportunity for us to update the buffer valid flag since we just finished sending out a track's padding
+                    trackBufferValid = sdTaskInterface->finished && !trackParams->pendingDispatch && (bufferStatus->bufferOwnerDrive == trackParams->drive);
                 }
             }
         }
@@ -267,12 +269,15 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         if (!paddingSync && inSectorIndex >= BITS_PER_SECTOR) {
             // If we're about to go past the end of the sector, we need to move to the next one
             currentSector++;
-            if (currentSector >= sectorsPerTrack[side]) {
+            // Update the buffer valid flag to reflect whether the track buffer is now valid
+            // It could've gone from invalid to valid if the SD task finished, or valid to invalid if buffer ownership changed
+            trackBufferValid = sdTaskInterface->finished && !trackParams->pendingDispatch && (bufferStatus->bufferOwnerDrive == trackParams->drive);
+            if (currentSector >= sectorsPerTrack[trackParams->side]) {
                 currentSector = 0; // Or wrap back to sector 0 if we're at the end of the track
             }
             // Don't forget to reset the in-sector index since we're starting a new sector
             // Same as before, this is 0 for a Sony, but we cut off some of the sync bytes for a Twiggy
-            inSectorIndex = (metadata->driveType == DriveTwiggy) ? ((sizeof(trackBufferGCR[side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) : 0;
+            inSectorIndex = (metadata->driveType == DriveTwiggy) ? ((sizeof(trackBufferGCR[trackParams->side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) : 0;
         }
         // If we're emulating a Twiggy, then return back to the main loop after every bit so that we can do some housekeeping stuff
         if (metadata->driveType == DriveTwiggy) {
@@ -326,7 +331,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR bool processRawWriteData(uint32_t r
 // This function gets called whenever the Lisa pulls WRQ low and starts writing data to the disk
 // Note that it's called receiveSector instead of receiveTrack because the Lisa only writes one sector at a time
 // This makes our life a LOT easier
-__attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackBufferGCR[2][22], volatile SdTaskInterface *sdTaskInterface, TrackParams* trackParams, DiskImageMetadata* metadata) {
+__attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackBufferGCR[2][22], volatile SdTaskInterface *sdTaskInterface, TrackParams* trackParams, BufferStatus* bufferStatus, DiskImageMetadata* metadata) {
     // The write process, despite sounding scary at first, is actually not too bad and looks like this:
         // 1. The Lisa lowers WRQ and starts sending valid data on WRD; each edge represents a 1, and the absence of an edge for 2us represents a 0
         // 2. The start of the data is the classic FF FF 3F CF F3 FC FF FF self-sync pattern, which we can safely ignore; we'll be fine even if we don't start sampling until midway through it
@@ -359,10 +364,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
     // We also need a firstTime variable to know when we see the first edge on WRD so that we can start measuring time between edges
     bool firstTime = true;
     
-    // This will hold the current state of the GPIO input register so that we can check the WRD and WRQ lines
-    uint32_t gpioData = 0;
+    uint32_t gpioData = REG_READ(GPIO_IN_REG); // Read the GPIO input register to get the current state of WRD and WRQ
 
-    bool prevWRD = REG_READ(GPIO_IN_REG) & (1 << WRD); // This will hold the previous state of WRD so that we can detect edges
+    bool prevWRD = gpioData & (1 << WRD); // This will hold the previous state of WRD so that we can detect edges
     bool currWRD = prevWRD; // And the current state
 
     // This tells us the first sector that was written in Twiggy track -1, so that we can use it to determine whether or not we need to reset the sector accumulator
@@ -415,7 +419,21 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
     // This is the last slot that we wrote a header to for each side; used to determine where to write the data during a Twiggy track -1 format
     static uint32_t prevSlot[2] = {0, 0};
 
-    gpioData = REG_READ(GPIO_IN_REG); // Read the GPIO input register to get the current state of WRD and WRQ
+    // The previously-selected drive last time we were in receiveSector
+    static uint32_t prevDrive = 1;
+    if (trackParams->drive != prevDrive) {
+        // If the drive changed, then we need to reset some of our formatting-related variables to avoid getting confused
+        lastWriteWasHeader = false;
+        prevSideNum = 0;
+        prevFormat = 0;
+        prevSlot[0] = 0;
+        prevSlot[1] = 0;
+        firstSectorWritten[0] = 0;
+        firstSectorWritten[1] = 0;
+        sectorAccumulator[0] = 0;
+        sectorAccumulator[1] = 0;
+    }
+    prevDrive = trackParams->drive; // Now update prevDrive to the current drive
 
     // Skip all of the read logic here if WRQ is high, meaning that the Lisa isn't writing to us anymore
     // If we're here and WRQ is high, then it means that we need to write out the stash, so no need to try and read in any sectors
@@ -506,23 +524,25 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         // That second condition of stashCount > 0 might seem a little weird because why would we ever want to stash data if the SD card isn't busy?
         // Well, it's because data must be written out in the order it's received in order for the lastWriteWasHeader logic to work
         // So if the stash already has stuff in it, then we need to keep filling it instead of bypassing it to maintain that order
-        if (!sdTaskInterface->finished || trackParams->stashCount > 0) {
-            if (trackParams->stashCount >= 16) {
+        if ((bufferStatus->bufferOwnerDrive != trackParams->drive) || !sdTaskInterface->finished || (bufferStatus->stashCount > 0)) {
+            if (bufferStatus->stashCount >= 16) {
                 // If the stash is full, then we have a problem and need to return without doing anything else
                 lostSectorCount++;
                 snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "ERROR: Sector stash overflow! Lost %d sectors so far.\n", lostSectorCount);
                 debugPrint(debugString, strlen(debugString));
                 return;
             }
-            else if (trackParams->stashCount > 0) {
-                snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Stash count: %d\n", trackParams->stashCount);
+            else if (bufferStatus->stashCount > 0) {
+                snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Stash count: %d\n", bufferStatus->stashCount);
                 debugPrint(debugString, strlen(debugString));
             }
             // Go ahead and copy the data into the stash, remembering that it's a FIFO
             memcpy(sectorStash[stashHead].data, dataBuffer, 704);
-            sectorStash[stashHead].state = writeState; // Don't forget to copy writeState and gpioData too
+            sectorStash[stashHead].state = writeState; // Don't forget to copy writeState, gpioDta, track, and drive too
             sectorStash[stashHead].gpio = gpioData;
-            trackParams->stashCount++; // Increment the stash count to mark that we've added an entry
+            sectorStash[stashHead].track = trackParams->currentTrack;
+            sectorStash[stashHead].drive = trackParams->drive;
+            bufferStatus->stashCount++; // Increment the stash count to mark that we've added an entry
             stashHead = (stashHead + 1) % 16; // Move the head to the next position
             return; // And then return so that we don't touch trackBufferGCR whatsoever; the loop can call us again once the task is done
         }
@@ -535,16 +555,26 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         } else {
             // Otherwise, it's safe to proceed and write the stash to trackBufferGCR
             // But only if the stash is non-empty; double-check to be safe
-            if (trackParams->stashCount == 0) {
+            if (bufferStatus->stashCount == 0) {
                 return;
             }
-            // Copy one stash entry per call to avoid blocking for too long; the loop will call us again to write the next one
+            // Make sure that the entry in the stash that we want to copy is actually for the track/drive that own the buffer
+            // If not, skip it, move onto the next one, and increment the lost sector count since we just lost a sector
+            if (sectorStash[stashTail].track != bufferStatus->bufferOwnerTrack || sectorStash[stashTail].drive != bufferStatus->bufferOwnerDrive) {
+                lostSectorCount++;
+                snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "ERROR: Stash entry for track %d, drive %d doesn't match current track %d, drive %d! Lost %d sectors so far.\n", sectorStash[stashTail].track, sectorStash[stashTail].drive, bufferStatus->bufferOwnerTrack, bufferStatus->bufferOwnerDrive, lostSectorCount);
+                debugPrint(debugString, strlen(debugString));
+                bufferStatus->stashCount--; // Decrement the stash count to mark that we've lost one entry
+                stashTail = (stashTail + 1) % 16; // And move the tail to the next position
+                return; // And return so that we don't touch trackBufferGCR at all
+            }
+            // Otherwise, copy one stash entry per call to avoid blocking for too long; the loop will call us again to write the next one
             // Once again, remember that the stash is a FIFO; we need to write out the oldest entry first
             memcpy(dataBuffer, sectorStash[stashTail].data, 704); // Copy the oldest stash entry into the main data buffer
             // And also restore writeState and gpioData from the stash entry so that we can write it to the proper GcrSector in trackBufferGCR
             writeState = sectorStash[stashTail].state;
             gpioData = sectorStash[stashTail].gpio;
-            trackParams->stashCount--; // Decrement the stash count to mark that we've written one entry
+            bufferStatus->stashCount--; // Decrement the stash count to mark that we've written one entry
             stashTail = (stashTail + 1) % 16; // And move the tail to the next position
         }
     }
@@ -606,7 +636,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         // And mark that the track is dirty so that we know to write it back to the disk image later
         // But ONLY if it's not the Twiggy timing track -1, since that track just gets discarded after we use it
         if (trackParams->currentTrack >= 0) {
-            trackParams->dirty = true;
+            bufferStatus->bufferDirty = true;
         }
     } else if (writeState == HEADER) {
         // If this is a header write, then we need to copy the 4 bytes of header data and the 1-byte header checksum into the proper GcrSector
@@ -702,7 +732,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void receiveSector(GcrSector trackB
         // And mark that the track is dirty so that we know to write it back to the disk image later
         // But ONLY if it's not the Twiggy timing track -1, since that track just gets discarded after we use it
         if (trackParams->currentTrack >= 0) {
-            trackParams->dirty = true;
+            bufferStatus->bufferDirty = true;
         }
     }
 }

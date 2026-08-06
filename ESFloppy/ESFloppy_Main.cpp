@@ -17,13 +17,14 @@
 static DecodedSector trackBufferDecoded[2][22]; // Buffer for decoded sectors for each side of the disk (2 sides, max 22 sectors per track)
 static GcrSector trackBufferGCR[2][22]; // Buffer for GCR-encoded sectors for each side of the disk
 
-DiskImageMetadata diskMetadata;
-
+DiskImageMetadata diskMetadata[2]; // Metadata for the disk images, one for each drive
+// And pointers to the metadata
+DiskImageMetadata* diskMetadataPointers[2] = {&diskMetadata[0], &diskMetadata[1]};
 // Make an SdTaskInterface struct; make sure it's static and volatile since it's shared between two cores
-static volatile SdTaskInterface sdTaskInterface = {0, 0, READ_TRACK, false, true, false};
+static volatile SdTaskInterface sdTaskInterface = {0, 0, 1, 1, READ_TRACK, false, true, false};
 
 // Make an instance of the SdTaskParams struct and initialize it with the appropriate pointers
-SdTaskParams sdTaskParams = {&sdTaskInterface, trackBufferGCR, trackBufferDecoded, &diskMetadata};
+SdTaskParams sdTaskParams = {&sdTaskInterface, trackBufferGCR, trackBufferDecoded, {diskMetadataPointers[0], diskMetadataPointers[1]}};
 
 /*
 void updateOLED () {
@@ -92,11 +93,11 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void loop() {
     // In the main loop here, we just need to run the appropriate drive interface loop based on the drive type of the open disk image
     //if (diskMetadata.driveType == Drive400 || diskMetadata.driveType == Drive800) {
         // If it's a 400K or 800K disk, then run the Sony loop
-        sonyLoop(&sdTaskInterface, trackBufferGCR, &diskMetadata);
+        sonyLoop(&sdTaskInterface, trackBufferGCR, diskMetadataPointers);
     //}
     //else if (diskMetadata.driveType == DriveTwiggy) {
         // If it's a Twiggy disk, then run the Twiggy loop (duh)
-        twiggyLoop(&sdTaskInterface, trackBufferGCR, &diskMetadata);
+        twiggyLoop(&sdTaskInterface, trackBufferGCR, diskMetadataPointers);
     //}
     // Otherwise, just don't do anything (although we do have to yield our task)
     //vTaskDelay(0);

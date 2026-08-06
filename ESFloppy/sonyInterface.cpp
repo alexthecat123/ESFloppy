@@ -21,10 +21,12 @@ uint32_t ejectStartTime;
 uint32_t tachFreq = 0;
 
 // Create a new trackParams struct to hold the current state of the track we're on and any pending operations on it
-static TrackParams trackParams = {false, 0, READ_TRACK, false, 0, true, 0, false};
+static TrackParams trackParams = {1, false, false, 0, 0, true};
+
+static BufferStatus bufferStatus = {0, 1, false, 0}; // The current state of the track buffer and which drive owns it (although there's only one drive here)
 
 // The main register-access loop for the Sony drive interface
-__attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterface* sdTaskInterface, GcrSector trackBufferGCR[2][22], DiskImageMetadata* metadata) {
+__attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterface* sdTaskInterface, GcrSector trackBufferGCR[2][22], DiskImageMetadata* metadata[2]) {
     // Don't do anything unless the drive is enabled (DR1 low)
         // When it's enabled, we check for commands to the drive
         // The read/write register comes in on CA2-CA0 (PH2-PH0) and the low bit (SEL) is on HDS
@@ -39,8 +41,11 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
     // First up, read in the states of all the I/O pins that we care about
     uint32_t gpioIn = REG_READ(GPIO_IN_REG); // Read the GPIO input register
 
+    // Set the side in trackParams to the current state of HDS
+    trackParams.side = (gpioIn & 1 << HDS) ? 1 : 0;
+
     // Every loop iteration, try to dispatch any pending SD card ops from previous seeks, if there are any
-    if (tryToStartSD(sdTaskInterface, &trackParams)) {
+    if (tryToStartSD(sdTaskInterface, &trackParams, &bufferStatus)) {
         stepComplete = true; // If we successfully started a new operation, set stepComplete to true if we were in the middle of a step
         trackParams.pendingDispatch = false; // Clear the pendingDispatch flag since we just dispatched it
     }
@@ -48,8 +53,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
     if ((gpioIn & (1 << DR1)) == 0) { // If the drive is enabled, then we need to check for commands
 
         // If WRQ is low (Lisa is trying to write) or we have stashed sectors to write out, then call receiveSector to handle it
-        if (((gpioIn & (1 << WRQ)) == 0) || trackParams.stashCount > 0) {
-            receiveSector(trackBufferGCR, sdTaskInterface, &trackParams, metadata);
+        if (((gpioIn & (1 << WRQ)) == 0) || bufferStatus.stashCount > 0) {
+            receiveSector(trackBufferGCR, sdTaskInterface, &trackParams, &bufferStatus, metadata[1]);
             return; // This makes sure that we refresh gpioIn with an updated read after we get back from receiveSector
         }
             
@@ -68,7 +73,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                     writeRDA(stepDirection);
                     break;
                 case 1: // /CSTIN register (false if disk inserted, else true)
-                    writeRDA(metadata->diskInserted ? 0 : 1);
+                    writeRDA(metadata[1]->diskInserted ? 0 : 1);
                     break;
                 case 2: // /STEP register (host sets low to step heads, drive sets high when step is complete)
                     writeRDA(stepComplete);
@@ -102,18 +107,18 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                 case 8: // RDDATA register for head 0
                     // If the drive's motor is running, then transmit data for side 0; otherwise, do nothing
                     if (trackParams.motorOn) {
-                        transmitTrack(trackBufferGCR, sdTaskInterface, &trackParams, metadata);
+                        transmitTrack(trackBufferGCR, sdTaskInterface, &trackParams, &bufferStatus, metadata[1]);
                     }
                     break;
                 case 9: // RDDATA register for head 1; only valid for 800k drives
                     // If the drive's motor is running, then transmit data for side 1; otherwise, do nothing
                     if (trackParams.motorOn) {
-                        transmitTrack(trackBufferGCR, sdTaskInterface, &trackParams, metadata);
+                        transmitTrack(trackBufferGCR, sdTaskInterface, &trackParams, &bufferStatus, metadata[1]);
                     }
                     break;
                 case 12:
                 case 13: // SIDES register (duplicated on both addresses 12 and 13); returns 0 for 400K drives, 1 for 800K drives
-                    writeRDA(metadata->driveType == Drive800 ? 1 : 0);
+                    writeRDA(metadata[1]->driveType == Drive800 ? 1 : 0);
                     break;
                 case 14:
                 case 15: // /DRVIN register (duplicated on both addresses 14 and 15); hard-coded to 0 as a way for the host to detect a drive connected
@@ -139,9 +144,6 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         // We don't necessraily always want to step the heads here; if the SD card task is still busy, then we can't step until it's done
                         if (!trackParams.pendingDispatch) {
                             // If a dispatch to the SD task isn't already pending, then we can set up a pending one with the current seek
-                            trackParams.pendingCommand = trackParams.dirty ? WRITE_READ_TRACK : READ_TRACK; // If the track is dirty, then we need to write it out first, otherwise we can just read in the new track
-                            // Keep in mind that pendingTrackToWrite itself is set in tryToStartSD, so that's why we don't set it here
-                            trackParams.dirty = false; // Clear the dirty bit since the task already knows about it now
                             trackParams.pendingDispatch = true; // Mark that a dispatch is pending so we don't overwrite the pending command with a new one if the host seeks again
                         }
 
@@ -160,7 +162,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         trackParams.trackChanged = true; // Mark that the track has changed so we can reset the sector back to 0 in transmitTrack
                         stepComplete = false; // Mark that a step is in progress; it won't be done until the SD card task finishes THIS step
                         // Try to start the read and/or write for this seek on the SD card task if it isn't busy
-                        if (tryToStartSD(sdTaskInterface, &trackParams)) {
+                        if (tryToStartSD(sdTaskInterface, &trackParams, &bufferStatus)) {
                             stepComplete = true; // And mark that we're done with the current step if we were able to start the operation
                             trackParams.pendingDispatch = false; // Clear the pendingDispatch flag since we just dispatched it
                         }
@@ -178,11 +180,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
                         // If the motor just turned off, this is a prime opportunity to write the current track to the image if necessary
                         // This works basically the same as in the step case above, except that we don't need to change the track number since we're not stepping
-                        if (trackParams.dirty == true && !trackParams.pendingDispatch) {
-                            trackParams.pendingCommand = WRITE_READ_TRACK; // The track is guaranteed dirty here, so always make it a write
-                            trackParams.dirty = false;
+                        if (bufferStatus.bufferDirty == true && !trackParams.pendingDispatch) {
                             trackParams.pendingDispatch = true;
-                            if (tryToStartSD(sdTaskInterface, &trackParams)) {
+                            if (tryToStartSD(sdTaskInterface, &trackParams, &bufferStatus)) {
                                 stepComplete = true;
                                 trackParams.pendingDispatch = false;
                             }
@@ -204,14 +204,16 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         if (millis() - ejectStartTime >= 500) {
                             // If so, eject the disk
                             // First make sure that any pending writes are flushed to the image; dispatch the SD task the same way as usual
-                            if (trackParams.dirty == true) {
+                            if (bufferStatus.bufferDirty == true) {
                                 // Wait until the SD card task is finished with its current command before we dispatch it again
                                 // It's okay to block like this in the eject handler because we're ejecting the disk anyway
                                 while (sdTaskInterface->finished == false);
-                                sdTaskInterface->writeTrack = trackParams.pendingTrackToWrite;
+                                sdTaskInterface->writeTrack = bufferStatus.bufferOwnerTrack;
+                                sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
+                                sdTaskInterface->readDrive = trackParams.drive;
                                 sdTaskInterface->command = WRITE_READ_TRACK;
                                 sdTaskInterface->readTrack = trackParams.currentTrack;
-                                trackParams.dirty = false;
+                                bufferStatus.bufferDirty = false;
                                 sdTaskInterface->finished = false;
                                 __sync_synchronize();
                                 sdTaskInterface->start = true;
@@ -221,6 +223,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                             trackParams.pendingDispatch = false; // Clear the pendingDispatch flag since we're about to eject the disk
                             sdTaskInterface->command = CLOSE_IMAGE; // Now tell it to close the image
                             sdTaskInterface->finished = false;
+                            sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
+                            sdTaskInterface->readDrive = trackParams.drive;
                             __sync_synchronize();
                             sdTaskInterface->start = true; // And start the task
                             trackParams.motorOn = false; // Turn off the motor too

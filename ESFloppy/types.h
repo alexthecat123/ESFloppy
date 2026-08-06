@@ -82,6 +82,8 @@ enum SdTaskCommand {
 struct SdTaskInterface {
     uint8_t writeTrack; // What track to write
     uint8_t readTrack; // What track to read
+    uint32_t writeDrive; // What drive we want to write writeTrack to
+    uint32_t readDrive; // What drive we want to read readTrack from
     SdTaskCommand command; // What command to execute
     bool start; // We set this high to tell the task to start processing our requect
     bool finished; // The task sets this high when it's finished processing our request
@@ -146,14 +148,20 @@ struct GcrSector {
 // The only reason we really need this is because we need to pass these to a couple different functions
 // And it would be a pain to pass them all individually
 struct TrackParams {
+    uint32_t drive; // Which drive we're currently working with (0 = upper Twiggy, 1 = lower Twiggy/Sony)
     bool motorOn; // Whether the motor is on or not
-    uint32_t pendingTrackToWrite; // The track number we want to write to (if any)
-    SdTaskCommand pendingCommand; // The command we want to send to the SD card task (if any)
     bool pendingDispatch; // A flag that indicates whether there's a pending command to dispatch to the SD card task
     int32_t currentTrack; // The track number we're currently on; signed so that we can reach Twiggy track -1
+    bool side; // The side of the disk we're currently on
     bool trackChanged; // A flag that indicates whether the track has changed since the last time we checked
-    uint32_t stashCount; // How many sectors are currently in the write stash
-    bool dirty; // A flag that indicates whether the current track has been modified and needs to be written out
+};
+
+// A struct that contains the current state of the track buffer and which drive owns it
+struct BufferStatus {
+    int32_t bufferOwnerTrack; // Which track currently owns the track buffer
+    uint32_t bufferOwnerDrive; // Which drive currently owns the track buffer
+    bool bufferDirty; // Whether the track buffer is dirty and needs to be written out
+    uint32_t stashCount; // How many sectors are currently stashed and not yet written into the buffer
 };
 
 // An enum for whether the drive is a 400K Sony, 800K Sony, or a Twiggy
@@ -213,5 +221,5 @@ struct SdTaskParams {
     volatile SdTaskInterface* sdTaskInterface; // A pointer to the SdTaskInterface struct is the first param
     GcrSector (&trackBufferGCR)[2][22]; // We also need to pass in references to the two track buffers
     DecodedSector (&trackBufferDecoded)[2][22];
-    DiskImageMetadata* diskMetadata; // And finally, a pointer to the disk metadata struct
+    DiskImageMetadata* diskMetadata[2]; // A pointer to the disk metadata structs for both drives
 };

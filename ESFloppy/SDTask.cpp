@@ -18,7 +18,7 @@ Adafruit_SH1106G OLED = Adafruit_SH1106G(128, 64, &Wire, -1);
 
 SdFat32 SDCard; // The SD card object
 SdCard* card; // A pointer to the card object so we can use it in other files
-File32 disk; // The disk image that ESFloppy is using
+File32 disk[2]; // The disk images for the lower and upper floppy drives; 0 is upper Twiggy and 1 is lower Twiggy/Sony
 FatFile rootDir; // The root directory of the SD card
 
 //uint32_t startTime = 0;
@@ -26,26 +26,36 @@ FatFile rootDir; // The root directory of the SD card
 static char debugString[MAX_DEBUG_STRING_LENGTH]; // A string buffer for sending debug messages to the SD card task for printing over serial
 
 // This function tries to dispatch any pending SD card operations (if there are any) to the SD card task if it's finished with its previous operation
-__attribute__((optimize("Ofast"))) IRAM_ATTR bool tryToStartSD(volatile SdTaskInterface* sdTaskInterface, TrackParams* trackParams) {
-    if (!trackParams->pendingDispatch || !sdTaskInterface->finished) {
-        return false; // If there's nothing to dispatch or the SD card task isn't finished, then return false
+__attribute__((optimize("Ofast"))) IRAM_ATTR bool tryToStartSD(volatile SdTaskInterface* sdTaskInterface, TrackParams* trackParams, BufferStatus* bufferStatus) {
+    if (!trackParams->pendingDispatch || !sdTaskInterface->finished || bufferStatus->stashCount != 0) {
+        return false; // If there's nothing to dispatch, the SD card task isn't finished, or we haven't emptied the stash yet, then return false
     }
-    if (!disk.isOpen()) {
-        // If the disk image isn't open anymore (disk ejected), then we can't dispatch anything
+    if (!disk[trackParams->drive].isOpen()) {
+        // If the disk image for the drive we're reading from isn't open, then we can't dispatch anything to the SD card task
         // So just return true to make the caller think that everything's okay
+        // This should be okay because the Twiggy controller shouldn't ever interact with an ejected disk anyway
         // And of course set our flags to indicate that there's nothing pending anymore
         __sync_synchronize();
         sdTaskInterface->start = false;
         sdTaskInterface->finished = true;
         return true;
     }
-    //snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Took %dus to dispatch SD task.\n", micros() - startTime);
-    //debugPrint(debugString, strlen(debugString));
+
     // Otherwise, start up the SD task with the pending operation
-    sdTaskInterface->writeTrack = trackParams->pendingTrackToWrite; // The track that we need to write back to the disk image
+    // We need to set the command for the task to execute; if the track is dirty do a write, if it's not do a read
+    // But downgrade a write to a read if the drive we're trying to write to is ejected
+    if ((bufferStatus->bufferDirty && !disk[bufferStatus->bufferOwnerDrive].isOpen()) || !(bufferStatus->bufferDirty)) {
+        sdTaskInterface->command = READ_TRACK;
+    } else {
+        sdTaskInterface->command = WRITE_READ_TRACK;
+    }
+    sdTaskInterface->writeTrack = bufferStatus->bufferOwnerTrack; // The track that we need to write back to the disk image
     sdTaskInterface->readTrack = trackParams->currentTrack; // Whatever track we ended up on and need to read
-    sdTaskInterface->command = trackParams->pendingCommand; // Whether there's a track to write in the first place
-    trackParams->pendingTrackToWrite = trackParams->currentTrack; // Update pendingWriteTrack to wherever we are now for next time
+    sdTaskInterface->writeDrive = bufferStatus->bufferOwnerDrive; // We want to write writeTrack to the drive that currently owns the track buffer
+    bufferStatus->bufferOwnerDrive = trackParams->drive; // Update the buffer owner drive and track to the ones we're currently working with
+    bufferStatus->bufferOwnerTrack = trackParams->currentTrack;
+    bufferStatus->bufferDirty = false; // Mark that the buffer is no longer dirty if it was before
+    sdTaskInterface->readDrive = trackParams->drive; // And read readTrack from the drive that we're currently working with
     sdTaskInterface->finished = false; // We're obviously not finished anymore since we're dispatching a new operation
     __sync_synchronize(); // Call synchronize to make sure that everything above here is done before we move on
     sdTaskInterface->start = true; // Start the SD task
@@ -109,8 +119,23 @@ void sdCardTask(void* params) {
     //My Lisa Stuff/MacWorks Plus II Install.image
     //LisaTest 3.0 1.image
     //copy_image_800k.dc42
-    if (!openImage("twiggy.dc42", &disk, sdTaskParams->diskMetadata)) { // And try opening a disk image file
-        Serial.println("Failed to open disk image! Halting..."); // Give another error/infinite loop on failure
+    sdTaskParams->diskMetadata[0]->driveIndex = 0; // Set the drive index for the upper drive
+    if (!openImage("Twiggy/LisaGraph 1.0.dc42", &disk[0], sdTaskParams->diskMetadata[0])) { // And try opening a disk image file for the upper drive
+        Serial.println("Failed to open disk image for upper drive! Halting..."); // Give another error/infinite loop on failure
+        OLED.clearDisplay();
+        OLED.setTextSize(2);
+        OLED.setTextColor(SH110X_WHITE);
+        OLED.setCursor(0, 0);
+        OLED.print("Can't Open Disk!");
+        OLED.display();
+        while(1) {
+            // If we fail to open the disk image, then spin forever
+            vTaskDelay(1);
+        }
+    }
+    sdTaskParams->diskMetadata[1]->driveIndex = 1; // Set the drive index for the lower drive
+    if (!openImage("Twiggy/LisaDraw 1.0.dc42", &disk[1], sdTaskParams->diskMetadata[1])) { // And the lower drive
+        Serial.println("Failed to open disk image for lower drive! Halting..."); // Give another error/infinite loop on failure
         OLED.clearDisplay();
         OLED.setTextSize(2);
         OLED.setTextColor(SH110X_WHITE);
@@ -123,8 +148,8 @@ void sdCardTask(void* params) {
         }
     }
     // Read and encode track 0 so that we can start sending it out when the Lisa requests it
-    readTrack(0, &disk, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata);
-    encodeTrackToGCR(0, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata);
+    readTrack(0, &disk[sdTaskParams->sdTaskInterface->readDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
+    encodeTrackToGCR(0, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
     OLED.setTextSize(1); // Set the OLED text size to 1 and color to white
     OLED.setTextColor(SH110X_WHITE);
     Serial.println("ESFloppy is ready!"); // And if all this succeeds, print a ready message
@@ -151,22 +176,22 @@ void sdCardTask(void* params) {
         __sync_synchronize();
         // Things are pretty easy from here on; first check if we need to write a track, and if so, do it
         if (sdTaskParams->sdTaskInterface->command == WRITE_READ_TRACK) {
-            decodeTrackFromGCR(sdTaskParams->sdTaskInterface->writeTrack, sdTaskParams->trackBufferGCR, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata);
+            decodeTrackFromGCR(sdTaskParams->sdTaskInterface->writeTrack, sdTaskParams->trackBufferGCR, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->writeDrive]);
             uint32_t startTime = micros();
             // If a -1 arrives here (the Twiggy timing track), then it goes through as a 255 and writeTrack rejects it, just like we want
-            writeTrack(sdTaskParams->sdTaskInterface->writeTrack, &disk, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata);
+            writeTrack(sdTaskParams->sdTaskInterface->writeTrack, &disk[sdTaskParams->sdTaskInterface->writeDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->writeDrive]);
             snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Took %dus to write track.\n", micros() - startTime);
             debugPrint(debugString, strlen(debugString));
         }
         if (sdTaskParams->sdTaskInterface->command == READ_TRACK || sdTaskParams->sdTaskInterface->command == WRITE_READ_TRACK) {
             // If the command is either a read OR write, then we now need to read the requested track and encode it to GCR
             // Same deal here with the -1 for the Twiggy timing track; readTrack will reject it and not read anything
-            readTrack(sdTaskParams->sdTaskInterface->readTrack, &disk, sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata);
-            encodeTrackToGCR(sdTaskParams->sdTaskInterface->readTrack, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata);
+            readTrack(sdTaskParams->sdTaskInterface->readTrack, &disk[sdTaskParams->sdTaskInterface->readDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
+            encodeTrackToGCR(sdTaskParams->sdTaskInterface->readTrack, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
         }
         else if (sdTaskParams->sdTaskInterface->command == CLOSE_IMAGE) {
-            // If the command is to close the disk image, then obey
-            closeImage(&disk, sdTaskParams->diskMetadata);
+            // If the command is to close the disk image for the currently-selected drive, then obey
+            closeImage(&disk[sdTaskParams->sdTaskInterface->readDrive], sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
         }
         // Now that we're done, synchronize again to make sure that everything above here is truly done before we say we're done
         __sync_synchronize();

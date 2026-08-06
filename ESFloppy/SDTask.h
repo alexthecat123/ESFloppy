@@ -7,7 +7,7 @@
 #define MAX_DEBUG_STRING_LENGTH 255 // The max length of a debug string that can be sent to the SD card task for printing over serial
 
 // This function tries to dispatch any pending SD card operations (if there are any) to the SD card task if it's finished with its previous operation
-__attribute__((optimize("Ofast"))) IRAM_ATTR bool tryToStartSD(volatile SdTaskInterface* sdTaskInterface, TrackParams* trackParams);
+__attribute__((optimize("Ofast"))) IRAM_ATTR bool tryToStartSD(volatile SdTaskInterface* sdTaskInterface, TrackParams* trackParams, BufferStatus* bufferStatus);
 
 // This function is used to send debug messages (character strings) from the main core to the SD card task core
 // They're stored in a ring buffer and printed over serial whenever the SD core gets a chance
