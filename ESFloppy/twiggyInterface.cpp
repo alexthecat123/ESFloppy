@@ -26,9 +26,11 @@ static TrackParams trackParams[2] = {{0, false, false, 45, 0, true},
 static BufferStatus bufferStatus = {0, 1, false, 0}; // The current state of the track buffer and which drive owns it
 
 // The current microstep that we're on for each drive; each track consists of 8 of these
-// Start on lower (front) head track 45, the innermost track
+// Start on microstep 16, which is track 0, only 4 microsteps away from the recal point during clamping, allowing for quick clamping
 // The formula for converting this to a track number (for the lower head) is: track = (microStepCount - 16) >> 3
-int32_t microStepCount[2] = {376, 376};
+int32_t microStepCount[2] = {16, 16};
+
+uint32_t lastValidPhase = 0xFF; // The last valid stepper motor phase that we saw on PH[0:3]
 
 // A LUT to convert the current state of PH[0:3] into a step state (0-3) or an invalid state (0xFF)
 // See the loop below for an explanation of how this works
@@ -52,7 +54,6 @@ uint32_t phaseLUT[16] = {
 };
 
 uint32_t prevStepState[2] = {0, 0}; // The previous step state for each drive derived from the above LUT
-bool needsResync[2] = {false, false}; // Flags for each drive to indicate whether the phase lines are out of sync with the motor position for each drive
 
 uint32_t loopCounter = 0; // Increments on every twiggyLoop iteration; used for sequencing certain ops that don't need to happen every time
 
@@ -63,14 +64,10 @@ uint32_t driveSelectDebounced = 3; // The debounced drive select value; used to 
 uint32_t prevDriveSelectDebounce = 3; // The previous value of driveSelect; used in the debounce logic
 uint32_t driveStartTime = 0; // The time that driveSelect changed; also for debouncing purposes
 
-// Table to hold the four different possible SNS register values for both drives, indexed by [driveSelect][{PH0, HDS}]
-bool snsTable[2][4] = {{false, false, false, false}, {false, false, false, false}};
-
-// Current and previous states of the SNS pin
-bool currentSNS = false;
-bool prevSNS = true;
-
 uint32_t startTime = 0;
+
+bool snsTable[2][4]; // A table that contains the current states of the SNS registers for both Twiggy drives
+bool prevSNS = 0; // The previous state of the SNS line
 
 // The main register-access loop for the Twiggy drive interface
 __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInterface* sdTaskInterface, GcrSector trackBufferGCR[2][22], DiskImageMetadata* metadata[2]) {
@@ -113,8 +110,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
 
     // With that rather massive introduction out of the way, let's get to the actual implementation!
     // This whole thing goes in a big while(1) loop so that we don't have to waste time returning to the main loop and coming back
+    // Keep in mind that we have to get through this entire while(1) plus anything it calls in under 1us, so we have to be very careful about our timing budget
     while (1) {
-        //startTime = esp_cpu_get_cycle_count();
 
         // First up, read in the states of all the I/O pins
         gpioIn = REG_READ(GPIO_IN_REG);
@@ -134,7 +131,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
         // Only do this if a drive is selected of course
         if (driveSelect < 2) {
             // Look up the current state of SNS in the snsTable to determine what to output on the pin for the current drive
-            currentSNS = snsTable[driveSelect][((gpioIn >> 11) & 2) | ((gpioIn >> 8) & 1)];
+            // Using a LUT like this is much faster than a bunch of if statements or a case statement, and time is of the essence here
+            bool currentSNS = snsTable[driveSelect][((gpioIn >> 11) & 2) | ((gpioIn >> 8) & 1)];
             if (currentSNS != prevSNS) {
                 writeSNS(currentSNS); // If the SNS state has changed, then write it out to the pin
             }
@@ -209,15 +207,12 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                 // On iteration 4, handle the logic for dispatching any pending SD card ops from previous seeks, if any
                 // Only do this if the SD task is finished and we're not already waiting for a pending dispatch
                 // This check isn't really necessary, it just saves us a few cycles by not calling tryToStartSD when we know it won't do anything
-                // A check that IS necessary though is to only do this if just a single drive is selected
-                // Because if both or neither are selected, then we don't know which drive to dispatch for
-                if (driveSelect < 2) {
-                    if (trackParams[driveSelect].pendingDispatch && sdTaskInterface->finished) {
-                        if(tryToStartSD(sdTaskInterface, &trackParams[driveSelect], &bufferStatus)) {
-                            trackParams[driveSelect].pendingDispatch = false; // If it succeeded, then clear the pendingDispatch flag since we just dispatched it
-                            // And print out the seek that we just did
-                            //snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Drive %d Track %d\n", driveSelect, trackParams[driveSelect].currentTrack);
-                            //debugPrint(debugString, strlen(debugString));
+                // The for loop is necessary because we need to check both drives for pending dispatches
+                // And we can't just check the currently-selected drive because both or neither could be selected and yet still have an op pending
+                for (int drive = 0; drive < 2; drive++) {
+                    if (trackParams[drive].pendingDispatch && sdTaskInterface->finished) {
+                        if(tryToStartSD(sdTaskInterface, &trackParams[drive], &bufferStatus)) {
+                            trackParams[drive].pendingDispatch = false; // If it succeeded, then clear the pendingDispatch flag since we just dispatched it
                         }
                     }
                 }
@@ -238,34 +233,37 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                     // We could use if statements for all this, but a LUT is faster, so we'll do that instead
                     uint32_t stepState = phaseLUT[currPH]; // Look up the current step state from the phase LUT
 
-                    // Now we need to figure out how the step state has changed since the last time we checked
-                    // Only compute a delta if the step state was valid; otherwise ignore it
+                    // If the step state was valid, then update the lastValidPhase to the current step state
                     if (stepState != 0xFF) {
-                        if (needsResync[driveSelect] || driveSelect != prevDriveSelect) {
-                            // If we resynced the step state for this drive last time, or we just switched to it, then clear its resync flag
-                            needsResync[driveSelect] = false;
-                        } else {
-                            // Otherwise, compute the delta between the current and previous step states
-                            uint32_t stepDelta = (stepState - prevStepState[driveSelect] + 4) % 4;
-                            // If the delta is 1, then we stepped forward one microstep, so increment the microstep count
-                            if (stepDelta == 1) {
-                                // Cap it at the maximum microstep count so we don't go too far off the disk though
-                                if (microStepCount[driveSelect] < MAX_MICROSTEP_COUNT) {
-                                    microStepCount[driveSelect]++;
-                                }
-                            } else if (stepDelta == 3) { // If the delta is 3, then we stepped backward one microstep, so decrement the microstep count
-                                // It's okay for this to go negative; the drive will do this during the recal sequence
-                                microStepCount[driveSelect]--;
-                            }
-                        }
-                        prevStepState[driveSelect] = stepState;
-                    } else if (driveSelect != prevDriveSelect) {
-                        // If the step state is invalid, and we just switched to this drive, then we need to resync the state to the new drive
-                        needsResync[driveSelect] = true;
+                        lastValidPhase = stepState;
                     }
-                    // Otherwise, do absolutely nothing at all
 
-                    // Now convert that microstep count into a track number
+                    // Now we need to figure out how the step state has changed since the last time we checked
+                    if (driveSelect != prevDriveSelect) {
+                        // If we just switched to this drive, then set the prevStepState for this drive to the last valid phase
+                        prevStepState[driveSelect] = lastValidPhase;
+                    } else if (stepState != 0xFF && prevStepState[driveSelect] != 0xFF && stepState != prevStepState[driveSelect]) {
+                        // Otherwise, if the step state and previous step state are both valid and differ, then we need to update the microstep counter
+                        // Compute the delta between the current and previous step states
+                        uint32_t stepDelta = (stepState - prevStepState[driveSelect] + 4) % 4;
+                        // If the delta is 1, then we stepped forward one microstep, so increment the microstep count
+                        if (stepDelta == 1) {
+                            // Cap it at the maximum microstep count so we don't go too far off the disk though
+                            if (microStepCount[driveSelect] < MAX_MICROSTEP_COUNT) {
+                                microStepCount[driveSelect]++;
+                            }
+                        } else if (stepDelta == 3) { // If the delta is 3, then we stepped backward one microstep, so decrement the microstep count
+                            // It's okay for this to go negative; the drive will do this during the recal sequence
+                            microStepCount[driveSelect]--;
+                        }
+                    }
+                    if (stepState != 0xFF) {
+                        // Update the previous step state to the current one for the next iteration, assuming the current one is valid
+                        prevStepState[driveSelect] = stepState;
+                    }
+                    prevDriveSelect = driveSelect; // Last but not least, update prevDriveSelect to the current driveSelect
+
+                    // Now convert our microstep count into a track number
                     // The formula for this differs between the upper (rear) and lower (front) heads
                     // We use the lower head (side 1, HDS high) as our frame of reference, so its formula is: track = (microStepCount - 12) >> 3
                     // And as an aside, the upper head (side 0, HDS low) is: track = 45 - ((microStepCount - 12) >> 3)
@@ -284,8 +282,6 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                     // Also update the CAL register in the snsTable based on whether we're at track -1 (microstep 12 or less) or not
                     snsTable[0][2] = (microStepCount[0] <= 12);
                     snsTable[1][2] = (microStepCount[1] <= 12);
-
-                    prevDriveSelect = driveSelect; // Last but not least, update prevDriveSelect to the current driveSelect
                 }
                 break;
             }
@@ -350,6 +346,19 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                         // But only if the lower drive's motor is also off
                         REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
                     }
+                    // Now that the motor is off, we need to flush the track buffer to the SD card if it's dirty
+                    // We already do this on every seek, but what if the Lisa wrote the current track without seeking away?
+                    // Well, it won't get written until ejection, which should be fine, but what if the user just turns the emulator off without ejecting?
+                    // Then the write would get lost, so also commit the track whenever the motor turns off
+                    // This is a very rare edge case, but I have seen it happen, so we need to handle it
+                    if (bufferStatus.bufferDirty && bufferStatus.bufferOwnerDrive == 0 && !trackParams[0].pendingDispatch) {
+                        // If the buffer is dirty, this drive owns it, and there's no pending dispatch, then set one up
+                        trackParams[0].pendingDispatch = true;
+                        // And try to start it too
+                        if (tryToStartSD(sdTaskInterface, &trackParams[0], &bufferStatus)) {
+                            trackParams[0].pendingDispatch = false; // Clear the pendingDispatch flag if we successfully dispatched it
+                        }
+                    }
                 }
                 break;
             }
@@ -375,6 +384,15 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                         // Now that the lower drive's motor is off, turn off the LED
                         // But only if the upper drive's motor is also off
                         REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
+                    }
+                    // Do the exact same "flush on motor off" thing that we did for the upper drive; see the comments there for the explanation
+                    if (bufferStatus.bufferDirty && bufferStatus.bufferOwnerDrive == 1 && !trackParams[1].pendingDispatch) {
+                        // If the buffer is dirty, this drive owns it, and there's no pending dispatch, then set one up
+                        trackParams[1].pendingDispatch = true;
+                        // And try to start it too
+                        if (tryToStartSD(sdTaskInterface, &trackParams[1], &bufferStatus)) {
+                            trackParams[1].pendingDispatch = false; // Clear the pendingDispatch flag if we successfully dispatched it
+                        }
                     }
                 }
                 break;
@@ -422,7 +440,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                         // Mark that the disk is no longer inserted in this drive
                         // We need to do this first because the Lisa is polling SNS for it, and we're about to block for a while
                         metadata[driveSelect]->diskInserted = false;
-                        microStepCount[driveSelect] = 376; // Reset the microstep count to track 45 now that we're actually ejecting
+                        microStepCount[driveSelect] = 16; // Reset the microstep count to track 0 now that we're actually ejecting
                         if (bufferStatus.bufferDirty == true && bufferStatus.bufferOwnerDrive == trackParams[driveSelect].drive) {
                             // If the current track on one of the drives is dirty, then we need to write it out before we truly close the disk
                             // Wait until the SD card task is finished with its current command before we dispatch it again
@@ -468,10 +486,6 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                 break;
             }
         }
-
         loopCounter++; // On every loop iteration, increment the loop counter
-
-        //snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "%d %d\n", trackParams[driveSelect].motorOn, (esp_cpu_get_cycle_count() - startTime));
-        //debugPrint(debugString, strlen(debugString));
     }
 }

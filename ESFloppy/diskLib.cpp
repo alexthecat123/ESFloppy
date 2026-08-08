@@ -756,6 +756,16 @@ __attribute__((optimize("Ofast"))) void writeTrack(uint8_t track, File32* disk, 
             memcpy(&rawTagBuffer[sideTagBase[1]], &rawTagBuffer[sideTagBase[0] + (tagSectorCount[0] - 1) * 512], tagSkew[1]);
             tagSectorCount[0]--;
         }
+        // Another thing I discovered later on is that carriage position 45 side 1 shares a sector with the start of the tag data
+        // So we need to do something similar to the above for that case too
+        // Only do it if the image has tags though
+        if (metadata->tagsPresent && (dataSectorNumber[1] + dataSectorCount[1] > tagSectorNumber[0])) {
+            // tagSkew[0] contains how many bytes of the shared sector are used by the data area
+            // So copy that much data from the end of the side 1 data buffer into the tag buffer
+            memcpy(&rawTagBuffer[sideTagBase[0]], &rawDataBuffer[sideDataBase[1] + (dataSectorCount[1] - 1) * 512], tagSkew[0]);
+            // And then decrement dataSectorCount[1] so that only the tag write writes the sector
+            dataSectorCount[1]--;
+        }
     }
 
     // Now that we've got all the data and tags in our raw buffers, we can write them back to the disk image

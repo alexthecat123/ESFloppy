@@ -21,7 +21,8 @@ SdCard* card; // A pointer to the card object so we can use it in other files
 File32 disk[2]; // The disk images for the lower and upper floppy drives; 0 is upper Twiggy and 1 is lower Twiggy/Sony
 FatFile rootDir; // The root directory of the SD card
 
-//uint32_t startTime = 0;
+uint32_t diskInsertDelay = 0; // When we started the SD card task; used to insert the lower disk after a delay
+bool diskLoadingComplete = false; // A flag to indicate whether we've finished loading the lower disk yet
 
 static char debugString[MAX_DEBUG_STRING_LENGTH]; // A string buffer for sending debug messages to the SD card task for printing over serial
 
@@ -120,7 +121,7 @@ void sdCardTask(void* params) {
     //LisaTest 3.0 1.image
     //copy_image_800k.dc42
     sdTaskParams->diskMetadata[0]->driveIndex = 0; // Set the drive index for the upper drive
-    if (!openImage("Twiggy/LisaGraph 1.0.dc42", &disk[0], sdTaskParams->diskMetadata[0])) { // And try opening a disk image file for the upper drive
+    if (!openImage("Twiggy/LOS 1.0 Install 1.dc42", &disk[0], sdTaskParams->diskMetadata[0])) { // And try opening a disk image file for the upper drive
         Serial.println("Failed to open disk image for upper drive! Halting..."); // Give another error/infinite loop on failure
         OLED.clearDisplay();
         OLED.setTextSize(2);
@@ -134,7 +135,7 @@ void sdCardTask(void* params) {
         }
     }
     sdTaskParams->diskMetadata[1]->driveIndex = 1; // Set the drive index for the lower drive
-    if (!openImage("Twiggy/LisaDraw 1.0.dc42", &disk[1], sdTaskParams->diskMetadata[1])) { // And the lower drive
+    if (!openImage("Twiggy/LOS 1.0 Install 2.dc42", &disk[1], sdTaskParams->diskMetadata[1])) { // And the lower drive
         Serial.println("Failed to open disk image for lower drive! Halting..."); // Give another error/infinite loop on failure
         OLED.clearDisplay();
         OLED.setTextSize(2);
@@ -147,12 +148,17 @@ void sdCardTask(void* params) {
             vTaskDelay(1);
         }
     }
+    // Mark the upper disk as inserted, but the lower one as not inserted; we'll insert it later on a couple-second delay in the main SD task
+    sdTaskParams->diskMetadata[0]->diskInserted = true;
+    sdTaskParams->diskMetadata[1]->diskInserted = false;
+    diskLoadingComplete = false; // Mark that we haven't finished loading the lower disk yet
     // Read and encode track 0 so that we can start sending it out when the Lisa requests it
     readTrack(0, &disk[sdTaskParams->sdTaskInterface->readDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
     encodeTrackToGCR(0, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
     OLED.setTextSize(1); // Set the OLED text size to 1 and color to white
     OLED.setTextColor(SH110X_WHITE);
     Serial.println("ESFloppy is ready!"); // And if all this succeeds, print a ready message
+    diskInsertDelay = esp_cpu_get_cycle_count(); // Get the current time so that we know when to insert the lower disk after a couple seconds
     // Make sure that everything above here is truly done before we continue
     __sync_synchronize();
     sdTaskParams->sdTaskInterface->initDone = true; // Set initDone to tell the main task that we're done initializing now
@@ -164,6 +170,11 @@ void sdCardTask(void* params) {
             while ((debugTail != debugHead) && !sdTaskParams->sdTaskInterface->start) {
                 Serial.print((const char*)debugRingBuf[debugTail]); // Print the next debug message in the ring buffer
                 debugTail = (debugTail + 1) & 15; // And move the tail pointer to the next message in the ring buffer
+            }
+            // If it's been 3 seconds since we started, then insert the lower disk if it hasn't been inserted yet
+            if ((esp_cpu_get_cycle_count() - diskInsertDelay) > 720000000 && !diskLoadingComplete && !sdTaskParams->diskMetadata[1]->diskInserted) {
+                sdTaskParams->diskMetadata[1]->diskInserted = true; // Mark the lower disk as inserted
+                diskLoadingComplete = true; // And mark that we've finished loading the lower disk
             }
             //updateOLED(); // Update the OLED display with the current status; this only actually writes the display if something on the screen changed
             vTaskDelay(1);
@@ -180,12 +191,17 @@ void sdCardTask(void* params) {
             uint32_t startTime = micros();
             // If a -1 arrives here (the Twiggy timing track), then it goes through as a 255 and writeTrack rejects it, just like we want
             writeTrack(sdTaskParams->sdTaskInterface->writeTrack, &disk[sdTaskParams->sdTaskInterface->writeDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->writeDrive]);
-            snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Took %dus to write track.\n", micros() - startTime);
+            snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "wrote drive %d track %d in %dus\n",
+                sdTaskParams->sdTaskInterface->writeDrive, sdTaskParams->sdTaskInterface->writeTrack,
+                micros() - startTime);
             debugPrint(debugString, strlen(debugString));
         }
         if (sdTaskParams->sdTaskInterface->command == READ_TRACK || sdTaskParams->sdTaskInterface->command == WRITE_READ_TRACK) {
             // If the command is either a read OR write, then we now need to read the requested track and encode it to GCR
             // Same deal here with the -1 for the Twiggy timing track; readTrack will reject it and not read anything
+            snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "read drive %d track %d\n",
+                    sdTaskParams->sdTaskInterface->readDrive, sdTaskParams->sdTaskInterface->readTrack);
+            debugPrint(debugString, strlen(debugString));
             readTrack(sdTaskParams->sdTaskInterface->readTrack, &disk[sdTaskParams->sdTaskInterface->readDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
             encodeTrackToGCR(sdTaskParams->sdTaskInterface->readTrack, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
         }
