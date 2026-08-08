@@ -26,38 +26,6 @@ static volatile SdTaskInterface sdTaskInterface = {0, 0, 1, 1, READ_TRACK, false
 // Make an instance of the SdTaskParams struct and initialize it with the appropriate pointers
 SdTaskParams sdTaskParams = {&sdTaskInterface, trackBufferGCR, trackBufferDecoded, {diskMetadataPointers[0], diskMetadataPointers[1]}};
 
-/*
-void updateOLED () {
-    static uint32_t prevTrack = 0xFFFFFFFF;
-    static uint32_t prevMotorOn = 0xFFFFFFFF;
-    static uint32_t prevImageType = 0xFFFFFFFF;
-    static uint32_t prevDriveType = 0xFFFFFFFF;
-    static uint32_t prevDiskInserted = 0xFFFFFFFF;
-    static uint32_t prevEjectPending = 0xFFFFFFFF;
-    if (prevTrack == currentTrack && prevMotorOn == motorOn && prevImageType == diskMetadata.imageType && prevDriveType == diskMetadata.driveType && prevDiskInserted == diskMetadata.diskInserted && prevEjectPending == ejectPending) {
-        return; // If nothing has changed, don't update the display
-    }
-    OLED.clearDisplay();
-    //OLED.setTextSize(1);
-    //OLED.setTextColor(SH110X_WHITE);
-    OLED.setCursor(0, 0);
-    OLED.print("Track: "); OLED.println(currentTrack);
-    OLED.print("Motor: "); OLED.println(motorOn ? "ON" : "OFF");
-    OLED.print("Image Type: "); OLED.println(diskMetadata.imageType == DC42 ? "DC42" : "RAW");
-    OLED.print("Drive Type: "); OLED.println(diskMetadata.driveType == Drive400 ? "400K" : "800K");
-    OLED.print("Disk in Place: "); OLED.println(diskMetadata.diskInserted ? "YES" : "NO");
-    OLED.print("Eject Pending: "); OLED.println(ejectPending ? "YES" : "NO");
-    OLED.display();
-
-    prevTrack = currentTrack;
-    prevMotorOn = motorOn;
-    prevImageType = diskMetadata.imageType;
-    prevDriveType = diskMetadata.driveType;
-    prevDiskInserted = diskMetadata.diskInserted;
-    prevEjectPending = ejectPending;
-}*/
-
-
 void setup() {
     init(); // Init the ESP32 Arduino core
     initLEDC(RDA); // Initialize the LEDC peripheral on the RDA pin for sending TACH pulses
@@ -91,14 +59,14 @@ void setup() {
 
 __attribute__((optimize("Ofast"))) IRAM_ATTR void loop() {
     // In the main loop here, we just need to run the appropriate drive interface loop based on the drive type of the open disk image
-    //if (diskMetadata.driveType == Drive400 || diskMetadata.driveType == Drive800) {
+    if (diskMetadataPointers[1]->driveType == Drive400 || diskMetadataPointers[1]->driveType == Drive800) {
         // If it's a 400K or 800K disk, then run the Sony loop
         sonyLoop(&sdTaskInterface, trackBufferGCR, diskMetadataPointers);
-    //}
-    //else if (diskMetadata.driveType == DriveTwiggy) {
+    }
+    else if (diskMetadataPointers[1]->driveType == DriveTwiggy) {
         // If it's a Twiggy disk, then run the Twiggy loop (duh)
         twiggyLoop(&sdTaskInterface, trackBufferGCR, diskMetadataPointers);
-    //}
+    }
     // Otherwise, just don't do anything (although we do have to yield our task)
     //vTaskDelay(0);
 }

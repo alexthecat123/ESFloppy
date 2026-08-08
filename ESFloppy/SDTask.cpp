@@ -1,6 +1,7 @@
 #include <Arduino.h>
-#include <Adafruit_SH110X.h>
+#include <U8g2lib.h>
 #include <SdFat.h>
+#include <Wire.h>
 #include "diskLib.h"
 #include "GCRLib.h"
 #include "SDTask.h"
@@ -13,8 +14,9 @@
 SPIClass SD_SPI(HSPI); // These two lines make sure that we use hardware SPI at 20MHz for the SD card
 #define SD_CONFIG SdSpiConfig(SD_CS, DEDICATED_SPI, SD_SCK_MHZ(20), &SD_SPI)
 
-// Create the OLED display object; we want a 128x64 display
-Adafruit_SH1106G OLED = Adafruit_SH1106G(128, 64, &Wire, -1);
+// Create the OLED display object; we want a SH1106-based 128x64 I2C display
+U8G2_SH1106_128X64_NONAME_F_HW_I2C OLED(U8G2_R0, U8X8_PIN_NONE);
+
 
 SdFat32 SDCard; // The SD card object
 SdCard* card; // A pointer to the card object so we can use it in other files
@@ -93,19 +95,23 @@ void sdCardTask(void* params) {
     SD_SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); // Start comms with the SD card using our hardware SPI instance
     // Now initialize the OLED
     Wire.begin(OLED_SDA, OLED_SCL); // Start the I2C bus for the OLED
-    OLED.begin(0x3C, true); // And init it
+    OLED.begin(); // And init it
     // Clear the display since there might be garbage on it after reset
-    OLED.clearDisplay();
-    OLED.display();
+    OLED.clearBuffer();
+    OLED.sendBuffer();
+    // Set the default font and text settings for the OLED
+    //OLED.setFont(u8g2_font_Untitled16PixelSansSerifBitmap_tr);
+    OLED.setFont(u8g2_font_5x8_mf);
+    OLED.setFontRefHeightExtendedText(); // Not sure what this one does; I copy-pasted it from one of the u8g2 examples
+    OLED.setDrawColor(1);
+    OLED.setFontPosTop(); // Same goes for this one
+    OLED.setFontDirection(0);
     // And now move onto the SD card
     if (!SDCard.begin(SD_CONFIG)) { // Initialize the SD card with our hardware SPI instance
         Serial.println("SD card initialization failed! Halting..."); // And print an error/go into an infinite loop on failure
-        OLED.clearDisplay();
-        OLED.setTextSize(2);
-        OLED.setTextColor(SH110X_WHITE);
-        OLED.setCursor(0, 0);
-        OLED.print("SD Init Failed!");
-        OLED.display();
+        OLED.clearBuffer();
+        OLED.drawStr( 0, 0, "SD init failed!");
+        OLED.sendBuffer();
         while(1) {
             // If we fail to init the SD card, then spin forever
             // Make sure to call vTaskDelay instead of just a plain while(1) loop so that the watchdog doesn't reset the ESP32
@@ -121,42 +127,35 @@ void sdCardTask(void* params) {
     //LisaTest 3.0 1.image
     //copy_image_800k.dc42
     sdTaskParams->diskMetadata[0]->driveIndex = 0; // Set the drive index for the upper drive
-    if (!openImage("Twiggy/LOS 1.0 Install 1.dc42", &disk[0], sdTaskParams->diskMetadata[0])) { // And try opening a disk image file for the upper drive
+    /*if (!openImage("Twiggy/LOS 1.0 Install 1.dc42", &disk[0], sdTaskParams->diskMetadata[0])) { // And try opening a disk image file for the upper drive
         Serial.println("Failed to open disk image for upper drive! Halting..."); // Give another error/infinite loop on failure
-        OLED.clearDisplay();
-        OLED.setTextSize(2);
-        OLED.setTextColor(SH110X_WHITE);
-        OLED.setCursor(0, 0);
-        OLED.print("Can't Open Disk!");
-        OLED.display();
+        OLED.clearBuffer();
+        OLED.drawStr( 0, 0, "Failed to open image!");
+        OLED.sendBuffer();
         while(1) {
             // If we fail to open the disk image, then spin forever
             vTaskDelay(1);
         }
-    }
-    sdTaskParams->diskMetadata[1]->driveIndex = 1; // Set the drive index for the lower drive
-    if (!openImage("Twiggy/LOS 1.0 Install 2.dc42", &disk[1], sdTaskParams->diskMetadata[1])) { // And the lower drive
-        Serial.println("Failed to open disk image for lower drive! Halting..."); // Give another error/infinite loop on failure
-        OLED.clearDisplay();
-        OLED.setTextSize(2);
-        OLED.setTextColor(SH110X_WHITE);
-        OLED.setCursor(0, 0);
-        OLED.print("Can't Open Disk!");
-        OLED.display();
+    }*/
+    sdTaskParams->diskMetadata[1]->driveIndex = 1; // Set the drive index for the lower/Sony drive
+    if (!openImage("copy_image_800k.dc42", &disk[1], sdTaskParams->diskMetadata[1])) { // And the lower drive
+        Serial.println("Failed to open disk image for lower/Sony drive! Halting..."); // Give another error/infinite loop on failure
+        OLED.clearBuffer();
+        OLED.drawStr( 0, 0, "Failed to open image!");
+        OLED.sendBuffer();
         while(1) {
             // If we fail to open the disk image, then spin forever
             vTaskDelay(1);
         }
     }
     // Mark the upper disk as inserted, but the lower one as not inserted; we'll insert it later on a couple-second delay in the main SD task
-    sdTaskParams->diskMetadata[0]->diskInserted = true;
-    sdTaskParams->diskMetadata[1]->diskInserted = false;
+    //sdTaskParams->diskMetadata[0]->diskInserted = true;
+    //sdTaskParams->diskMetadata[1]->diskInserted = false;
+    sdTaskParams->diskMetadata[1]->diskInserted = true;
     diskLoadingComplete = false; // Mark that we haven't finished loading the lower disk yet
     // Read and encode track 0 so that we can start sending it out when the Lisa requests it
     readTrack(0, &disk[sdTaskParams->sdTaskInterface->readDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
     encodeTrackToGCR(0, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
-    OLED.setTextSize(1); // Set the OLED text size to 1 and color to white
-    OLED.setTextColor(SH110X_WHITE);
     Serial.println("ESFloppy is ready!"); // And if all this succeeds, print a ready message
     diskInsertDelay = esp_cpu_get_cycle_count(); // Get the current time so that we know when to insert the lower disk after a couple seconds
     // Make sure that everything above here is truly done before we continue
@@ -171,12 +170,11 @@ void sdCardTask(void* params) {
                 Serial.print((const char*)debugRingBuf[debugTail]); // Print the next debug message in the ring buffer
                 debugTail = (debugTail + 1) & 15; // And move the tail pointer to the next message in the ring buffer
             }
-            // If it's been 3 seconds since we started, then insert the lower disk if it hasn't been inserted yet
-            if ((esp_cpu_get_cycle_count() - diskInsertDelay) > 720000000 && !diskLoadingComplete && !sdTaskParams->diskMetadata[1]->diskInserted) {
+            // If it's been 3 seconds since we started, then insert the lower Twiggy if it hasn't been inserted yet (and we're emulating Twiggies)
+            if ((esp_cpu_get_cycle_count() - diskInsertDelay) > 720000000 && !diskLoadingComplete && !sdTaskParams->diskMetadata[1]->diskInserted && sdTaskParams->diskMetadata[1]->driveType == DriveTwiggy) {
                 sdTaskParams->diskMetadata[1]->diskInserted = true; // Mark the lower disk as inserted
                 diskLoadingComplete = true; // And mark that we've finished loading the lower disk
             }
-            //updateOLED(); // Update the OLED display with the current status; this only actually writes the display if something on the screen changed
             vTaskDelay(1);
             continue;
         }

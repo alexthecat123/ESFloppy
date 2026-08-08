@@ -7,7 +7,7 @@
 
 // This file contains the routines for reading and writing flux data to and from the Lisa's floppy drive interface
 
-#define SEEK_LEADIN_SECTORS 5 // How many sectors before sector 0 to reset the sector counter to when seeking to a new track
+#define SEEK_LEADIN_SECTORS 5 // How many sectors before sector 0 to reset the sector counter to when seeking to a new track on Twiggy
 
 #define TWIGGY_SECTOR_LENGTH 780 // The length of a base Twiggy sector in GCR bytes; it's a bit shorter than a Sony one since there are fewer sync bytes
 
@@ -139,9 +139,10 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
         }
         // Now we need to reset the in-sector index and current sector to 0 and not do a catch-up
         // This isn't necessary, but it speeds things up since the FDC normally starts reading new tracks from sector 0, so might as well start there
-        // Except we don't actually want to immediately go to sector 0 because the controller won't start reading immediately
+        // Except on Twiggy we don't actually want to immediately go to sector 0 because the controller won't start reading immediately
         // It'll need a few ms to get ready, so if we start with sector 0 immediately, then it'll miss it and have to wait a whole revolution
         // That's a huge waste of time, so instead start SEEK_LEADIN_SECTORS before sector 0 to give it time to get ready
+        // On Sony we start right on sector 0 because the controller starts reading a lot faster
         // And remember that logical sectors differ from physical sectors, so we need to use our interleave LUT to convert between them
         // Use getInterleaveTable to find out what interleave table to use for our disk metadata
         InterleaveTable interleaveTable = getInterleaveTable(metadata, 0, true);
@@ -153,8 +154,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
                 break;
             }
         }
-        // Once we know where it is, we can set the current sector to SEEK_LEADIN_SECTORS before it, wrapping around if necessary
-        currentSector = (sector0Slot + sectorsPerTrack[trackParams->side] - SEEK_LEADIN_SECTORS) % sectorsPerTrack[trackParams->side];
+        // Once we know where it is, we can set the current sector to SEEK_LEADIN_SECTORS before it (Twiggy) or that sector itself (Sony), wrapping around if necessary
+        uint32_t leadInAmount = (metadata->driveType == DriveTwiggy) ? SEEK_LEADIN_SECTORS : 0;
+        currentSector = (sector0Slot + sectorsPerTrack[trackParams->side] - leadInAmount) % sectorsPerTrack[trackParams->side];
         // And reset the in-sector index to the start of the sector as well
         // For a Sony, this is index 0, but for a Twiggy, we cut off some of the sync bytes to make the sectors shorter
         inSectorIndex = (metadata->driveType == DriveTwiggy) ? ((sizeof(trackBufferGCR[trackParams->side][0]) << 3) - (TWIGGY_SECTOR_LENGTH << 3)) : 0;
@@ -176,8 +178,9 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void transmitTrack(GcrSector trackB
             // On a Sony, the Lisa is listening if it's accessing read registers 8 or 9
             // We don't care about the low side select bit; we just need to make sure the high 3 bits {PH2, PH1, PH0} are 100
             // And we also need to be sure that LSTRB (PH3) isn't high; if it is, then we might miss a write to regs 0 or 1 which look like regs 8 and 9 in write mode
+            // Also check WRQ and bail if it goes low; this means that a write just started and we need to go service it ASAP
             uint32_t gpioIn = REG_READ(GPIO_IN_REG);
-            if (!(gpioIn & 1 << PH2 && !(gpioIn & 1 << PH1) && !(gpioIn & 1 << PH0)) || (gpioIn & 1 << PH3)) {
+            if (!(gpioIn & 1 << PH2 && !(gpioIn & 1 << PH1) && !(gpioIn & 1 << PH0)) || (gpioIn & 1 << PH3) || !(gpioIn & 1 << WRQ)) {
                 // If not, then return
                 return;
             }
