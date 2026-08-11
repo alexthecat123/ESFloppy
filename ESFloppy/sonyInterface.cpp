@@ -21,9 +21,45 @@ uint32_t ejectStartTime;
 uint32_t tachFreq = 0;
 
 // Create a new trackParams struct to hold the current state of the track we're on and any pending operations on it
-static TrackParams trackParams = {1, false, false, 0, 0, true};
+static TrackParams trackParams = {1, false, false, 0, 0, true, EjectNone};
 
 static BufferStatus bufferStatus = {0, 1, false, 0}; // The current state of the track buffer and which drive owns it (although there's only one drive here)
+
+// Pointers to trackParams and bufferStatus used by the UI (which runs on the SD task) to read the status of the drive
+TrackParams* sonyUiTrackParams = &trackParams;
+BufferStatus* sonyUiBufferStatus = &bufferStatus;
+
+// Ejects the disk in the Sony drive
+__attribute__((optimize("Ofast"))) IRAM_ATTR void ejectDisk(volatile SdTaskInterface* sdTaskInterface) {
+    // First make sure that any pending writes are flushed to the image; dispatch the SD task the same way as usual
+    if (bufferStatus.bufferDirty == true) {
+        // Wait until the SD card task is finished with its current command before we dispatch it again
+        // It's okay to block like this in the eject handler because we're ejecting the disk anyway
+        while (sdTaskInterface->finished == false);
+        sdTaskInterface->writeTrack = bufferStatus.bufferOwnerTrack;
+        sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
+        sdTaskInterface->readDrive = trackParams.drive;
+        sdTaskInterface->command = WRITE_READ_TRACK;
+        sdTaskInterface->readTrack = trackParams.currentTrack;
+        bufferStatus.bufferDirty = false;
+        sdTaskInterface->finished = false;
+        __sync_synchronize();
+        sdTaskInterface->start = true;
+    }
+    // Wait until the SD card task is done with its current command
+    while (sdTaskInterface->finished == false);
+    trackParams.pendingDispatch = false; // Clear the pendingDispatch flag since we're about to eject the disk
+    sdTaskInterface->command = CLOSE_IMAGE; // Now tell it to close the image
+    sdTaskInterface->finished = false;
+    sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
+    sdTaskInterface->readDrive = trackParams.drive;
+    __sync_synchronize();
+    sdTaskInterface->start = true; // And start the task
+    trackParams.motorOn = false; // Turn off the motor too
+    ejectPending = false;
+    // And finally, set trackParams.ejectRequested to EjectNone (if it's not already) to indicate that the eject has been completed
+    trackParams.ejectRequested = EjectNone;
+}
 
 // The main register-access loop for the Sony drive interface
 __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterface* sdTaskInterface, GcrSector trackBufferGCR[2][22], DiskImageMetadata* metadata[2]) {
@@ -58,6 +94,11 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
             if (((gpioIn & (1 << WRQ)) == 0) || bufferStatus.stashCount > 0) {
                 receiveSector(trackBufferGCR, sdTaskInterface, &trackParams, &bufferStatus, metadata[1]);
                 return; // This makes sure that we refresh gpioIn with an updated read after we get back from receiveSector
+            }
+
+            // If the user has requested a force eject of the disk through the UI, then go ahead and do it
+            if (trackParams.ejectRequested == EjectForce) {
+                ejectDisk(sdTaskInterface);
             }
                 
             currLSTRB = (gpioIn & (1 << PH3)) ? 1 : 0; // Read the current state of LSTRB (PH3)
@@ -94,7 +135,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         break;
                     case 7: // /TACH register (produces 60 pulses per revolution when motor is on)
                         // Use our LUT to figure out what the LEDC divider value should be for the current track's TACH frequency
-                        tachFreq = tachDividerPerTrackLisa[trackParams.currentTrack];
+                        // Remember that we have to output a slightly different TACH frequency for the Mac vs the Lisa, so pick the appropriate LUT
+                        tachFreq = metadata[1]->systemType == SystemLisa ? tachDividerPerTrackLisa[trackParams.currentTrack] : tachDividerPerTrackMac[trackParams.currentTrack];
                         // Only output TACH pulses if the motor is on (DUH), and only start the LEDC if it's not already running
                         if (trackParams.motorOn && !ledcAttached) {
                             setFreqRaw(tachFreq, 8); // Set the LEDC divider value to our TACH frequency with 8-bit duty resolution
@@ -203,34 +245,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         else if (ejectPending == true) { // Otherwise, if an eject is pending, check if 500ms has passed
                             if (millis() - ejectStartTime >= 500) {
                                 // If so, eject the disk
-                                // First make sure that any pending writes are flushed to the image; dispatch the SD task the same way as usual
-                                if (bufferStatus.bufferDirty == true) {
-                                    // Wait until the SD card task is finished with its current command before we dispatch it again
-                                    // It's okay to block like this in the eject handler because we're ejecting the disk anyway
-                                    while (sdTaskInterface->finished == false);
-                                    sdTaskInterface->writeTrack = bufferStatus.bufferOwnerTrack;
-                                    sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
-                                    sdTaskInterface->readDrive = trackParams.drive;
-                                    sdTaskInterface->command = WRITE_READ_TRACK;
-                                    sdTaskInterface->readTrack = trackParams.currentTrack;
-                                    bufferStatus.bufferDirty = false;
-                                    sdTaskInterface->finished = false;
-                                    __sync_synchronize();
-                                    sdTaskInterface->start = true;
-                                }
-                                // Wait until the SD card task is done with its current command
-                                while (sdTaskInterface->finished == false);
-                                trackParams.pendingDispatch = false; // Clear the pendingDispatch flag since we're about to eject the disk
-                                sdTaskInterface->command = CLOSE_IMAGE; // Now tell it to close the image
-                                sdTaskInterface->finished = false;
-                                sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
-                                sdTaskInterface->readDrive = trackParams.drive;
-                                __sync_synchronize();
-                                sdTaskInterface->start = true; // And start the task
-                                trackParams.motorOn = false; // Turn off the motor too
-                                ejectPending = false;
-                                snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Disk Ejected!\n");
-                                debugPrint(debugString, strlen(debugString));
+                                ejectDisk(sdTaskInterface);
                             }
                         }
                         break;

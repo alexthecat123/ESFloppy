@@ -20,10 +20,14 @@ uint32_t gpioIn1 = 0; // And GPIO_IN1_REG
 bool ph2CameIn[2] = {false, false}; // A flag for each drive to indicate whether PH2 has come in since the last time we checked; used for clearing the eject button latch
 
 // Create a new trackParams struct to hold the current state of the track we're on and any pending operations on it for each drive
-static TrackParams trackParams[2] = {{0, false, false, 45, 0, true}, 
-                                    {1, false, false, 45, 0, true}};
+static TrackParams trackParams[2] = {{0, false, false, 45, 0, true, EjectNone}, 
+                                    {1, false, false, 45, 0, true, EjectNone}};
 
 static BufferStatus bufferStatus = {0, 1, false, 0}; // The current state of the track buffer and which drive owns it
+
+// Pointers to trackParams and bufferStatus used by the UI (which runs on the SD task) to read the status of the drives
+TrackParams* twiggyUiTrackParams[2] = {&trackParams[0], &trackParams[1]};
+BufferStatus* twiggyUiBufferStatus = &bufferStatus;
 
 // The current microstep that we're on for each drive; each track consists of 8 of these
 // Start on microstep 16, which is track 0, only 4 microsteps away from the recal point during clamping, allowing for quick clamping
@@ -68,6 +72,49 @@ uint32_t startTime = 0;
 
 bool snsTable[2][4]; // A table that contains the current states of the SNS registers for both Twiggy drives
 bool prevSNS = 0; // The previous state of the SNS line
+
+// Ejects the disk in the specified Twiggy drive
+__attribute__((optimize("Ofast"))) IRAM_ATTR void ejectDisk(uint32_t drive, volatile SdTaskInterface* sdTaskInterface, DiskImageMetadata* metadata) {
+    // Mark that the disk is no longer inserted in this drive
+    // We need to do this first because the Lisa is polling SNS for it, and we're about to block for a while
+    metadata->diskInserted = false;
+    microStepCount[drive] = 16; // Reset the microstep count to track 0 now that we're actually ejecting
+    if (bufferStatus.bufferDirty == true && bufferStatus.bufferOwnerDrive == trackParams[drive].drive) {
+        // If the current track on one of the drives is dirty, then we need to write it out before we truly close the disk
+        // Wait until the SD card task is finished with its current command before we dispatch it again
+        // It's okay to block like this in the eject handler because we're ejecting the disk anyway
+        while (sdTaskInterface->finished == false);
+        sdTaskInterface->command = WRITE_READ_TRACK;
+        sdTaskInterface->writeTrack = bufferStatus.bufferOwnerTrack;
+        sdTaskInterface->readTrack = trackParams[drive].currentTrack;
+        sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
+        sdTaskInterface->readDrive = trackParams[drive].drive;
+        sdTaskInterface->finished = false;
+        __sync_synchronize();
+        sdTaskInterface->start = true;
+    }
+    // Now that we've written out the current track if necessary, we can actually eject the disk
+    // So wait until the SD task is done with whatever it's doing
+    while (sdTaskInterface->finished == false);
+    if (bufferStatus.bufferDirty == true && bufferStatus.bufferOwnerDrive == trackParams[drive].drive) {
+        bufferStatus.bufferDirty = false; // Now that we've written it out (if necessary), clear bufferDirty
+    }
+    sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive; // writeDrive doesn't matter here
+    sdTaskInterface->readDrive = trackParams[drive].drive; // Set readDrive to the drive we're ejecting
+    trackParams[drive].pendingDispatch = false; // Clear the pendingDispatch flag since we're about to eject the disk
+    sdTaskInterface->command = CLOSE_IMAGE; // Now tell it to close the image
+    sdTaskInterface->finished = false;
+    __sync_synchronize();
+    sdTaskInterface->start = true; // And start the task
+    trackParams[drive].motorOn = false; // Turn off the motor too if it happens to be on
+    //snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Disk Ejected!\n");
+    //debugPrint(debugString, strlen(debugString));
+    // And finally, set bufferOwnerTrack to an invalid value to indicate that the buffer is no longer valid for this drive, if this drive is currently active
+    // This will prevent any of the logic that relies on it from running when the disk is no longer present
+    if (bufferStatus.bufferOwnerDrive == trackParams[drive].drive) {
+        bufferStatus.bufferOwnerTrack = 100;
+    }
+}
 
 // The main register-access loop for the Twiggy drive interface
 __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInterface* sdTaskInterface, GcrSector trackBufferGCR[2][22], DiskImageMetadata* metadata[2]) {
@@ -400,26 +447,27 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
             case 44: {
                 // On iteration 44, handle the eject button latch for both drives
 
-                // First handle latching button presses; this gets done regardless of whether the drives are enabled or not
-                // If the user has pressed either of the eject buttons, then latch ejectPressed to true for the corresponding drive
-                // The upper drive uses LEFT for eject and the lower drive uses RIGHT for eject
-                // Note that the buttons are active-low
-                if (!(gpioIn1 & (1 << (LEFT - 32)))) {
+                // First handle latching eject requests; this gets done regardless of whether the drives are enabled or not
+                // If the user has requested an eject on either drive through the UI, then set the latch for that drive
+                // This handles reqular ejects (like with the Twiggy eject button), not force ejects
+                if (trackParams[0].ejectRequested == EjectNormal) {
                     ejectPressed[0] = true;
+                    trackParams[0].ejectRequested = EjectNone; // Clear the ejectRequested flag so we don't keep setting the latch
                 }
-                if (!(gpioIn1 & (1 << (RIGHT - 32)))) {
+                if (trackParams[1].ejectRequested == EjectNormal) {
                     ejectPressed[1] = true;
+                    trackParams[1].ejectRequested = EjectNone;
                 }
 
-                // That's the code for pressing the buttons to set the latch, now let's handle clearing the latch
+                // That's the code for setting the latches, now let's handle clearing them
                 // Remember, this is done by the host asserting PH2, and a drive has to be enabled for its latch to clear
                 // We can't just directly check PH2 here because its pulse width is so short that we'll miss it given how infrequently this is executed
                 // So instead check the ph2CameIn flag that gets set in the code that's executed every iteration
-                // Only clear the latch if the user isn't actively pressing eject on either drive
-                if ((gpioIn1 & (1 << (LEFT - 32))) && ph2CameIn[0]) {
+                // Only clear the latch if the user isn't actively requesting an eject on either drive
+                if ((trackParams[0].ejectRequested != EjectNormal) && ph2CameIn[0]) {
                     ejectPressed[0] = false;
                 }
-                if ((gpioIn1 & (1 << (RIGHT - 32))) && ph2CameIn[1]) {
+                if ((trackParams[1].ejectRequested != EjectNormal) && ph2CameIn[1]) {
                     ejectPressed[1] = false;
                 }
                 ph2CameIn[0] = false; // And clear the ph2CameIn flags so we don't keep clearing the latch(es) on every iteration
@@ -437,51 +485,21 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                 // This simulates the "move the heads past track 45 to eject" behavior
                 if (driveSelect < 2) {
                     if (microStepCount[driveSelect] >= MAX_MICROSTEP_COUNT && metadata[driveSelect]->diskInserted) {
-                        // Mark that the disk is no longer inserted in this drive
-                        // We need to do this first because the Lisa is polling SNS for it, and we're about to block for a while
-                        metadata[driveSelect]->diskInserted = false;
-                        microStepCount[driveSelect] = 16; // Reset the microstep count to track 0 now that we're actually ejecting
-                        if (bufferStatus.bufferDirty == true && bufferStatus.bufferOwnerDrive == trackParams[driveSelect].drive) {
-                            // If the current track on one of the drives is dirty, then we need to write it out before we truly close the disk
-                            // Wait until the SD card task is finished with its current command before we dispatch it again
-                            // It's okay to block like this in the eject handler because we're ejecting the disk anyway
-                            while (sdTaskInterface->finished == false);
-                            sdTaskInterface->command = WRITE_READ_TRACK;
-                            sdTaskInterface->writeTrack = bufferStatus.bufferOwnerTrack;
-                            sdTaskInterface->readTrack = trackParams[driveSelect].currentTrack;
-                            sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive;
-                            sdTaskInterface->readDrive = trackParams[driveSelect].drive;
-                            sdTaskInterface->finished = false;
-                            __sync_synchronize();
-                            sdTaskInterface->start = true;
-                        }
-                        // Now that we've written out the current track if necessary, we can actually eject the disk
-                        // So wait until the SD task is done with whatever it's doing
-                        while (sdTaskInterface->finished == false);
-                        if (bufferStatus.bufferDirty == true && bufferStatus.bufferOwnerDrive == trackParams[driveSelect].drive) {
-                            bufferStatus.bufferDirty = false; // Now that we've written it out (if necessary), clear bufferDirty
-                        }
-                        sdTaskInterface->writeDrive = bufferStatus.bufferOwnerDrive; // writeDrive doesn't matter here
-                        sdTaskInterface->readDrive = trackParams[driveSelect].drive; // Set readDrive to the drive we're ejecting
-                        trackParams[driveSelect].pendingDispatch = false; // Clear the pendingDispatch flag since we're about to eject the disk
-                        sdTaskInterface->command = CLOSE_IMAGE; // Now tell it to close the image
-                        sdTaskInterface->finished = false;
-                        __sync_synchronize();
-                        sdTaskInterface->start = true; // And start the task
-                        trackParams[driveSelect].motorOn = false; // Turn off the motor too if it happens to be on
-                        snprintf(debugString, MAX_DEBUG_STRING_LENGTH, "Disk Ejected!\n");
-                        debugPrint(debugString, strlen(debugString));
-                        // And finally, set bufferOwnerTrack to an invalid value to indicate that the buffer is no longer valid for this drive, if this drive is currently active
-                        // This will prevent any of the logic that relies on it from running when the disk is no longer present
-                        if (bufferStatus.bufferOwnerDrive == trackParams[driveSelect].drive) {
-                            bufferStatus.bufferOwnerTrack = 100;
-                        }
+                        ejectDisk(driveSelect, sdTaskInterface, metadata[driveSelect]);
                     }
-
                     // This is also a good place to update the disk in place registers in the snsTable based on the latest metadata
                     snsTable[0][3] = metadata[0]->diskInserted;
                     snsTable[1][3] = metadata[1]->diskInserted;
 
+                }
+                // Also eject the disk if the user has requested a force eject through the UI, regardless of anything else
+                if (trackParams[0].ejectRequested == EjectForce) {
+                    ejectDisk(0, sdTaskInterface, metadata[0]);
+                    trackParams[0].ejectRequested = EjectNone; // Clear the ejectRequested flag so we don't keep ejecting
+                }
+                if (trackParams[1].ejectRequested == EjectForce) {
+                    ejectDisk(1, sdTaskInterface, metadata[1]);
+                    trackParams[1].ejectRequested = EjectNone;
                 }
                 break;
             }

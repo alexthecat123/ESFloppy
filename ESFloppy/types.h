@@ -144,6 +144,13 @@ struct GcrSector {
     uint8_t dataEpilogue[3] = {0xDE, 0xAA, 0xFF}; // Epilogue is only 2 bytes, the third is the don't care "heads off" byte
 };
 
+// An enum for the different types of ejects that can be requested from the UI
+enum EjectType {
+    EjectNone, // No eject requested
+    EjectNormal, // A normal eject (pressing the Twiggy eject button)
+    EjectForce // A force eject (ripping the disk out of a Sony or Twiggy drive)
+};
+
 // A struct that contains some parameters related to a track
 // The only reason we really need this is because we need to pass these to a couple different functions
 // And it would be a pain to pass them all individually
@@ -154,6 +161,7 @@ struct TrackParams {
     int32_t currentTrack; // The track number we're currently on; signed so that we can reach Twiggy track -1
     bool side; // The side of the disk we're currently on
     bool trackChanged; // A flag that indicates whether the track has changed since the last time we checked
+    EjectType ejectRequested; // Whether (and what kind of) eject the user has requested from the UI
 };
 
 // A struct that contains the current state of the track buffer and which drive owns it
@@ -169,6 +177,12 @@ enum DriveType {
     Drive400 = 0,
     Drive800 = 1,
     DriveTwiggy = 2
+};
+
+// Another enum for the different systems that we support: Mac and Lisa
+enum SystemType {
+    SystemMac = 0,
+    SystemLisa = 1
 };
 
 // One for the image format, DC42 or raw
@@ -190,6 +204,13 @@ enum WriteState {
     DATA // It was a data prologue, so we're now reading the data
 };
 
+// Another enum for the different emulation modes that we can be in
+enum EmulMode {
+    ModeSonyLisa, // Sony drive for Lisa
+    ModeSonyMac, // Sony drive for Mac
+    ModeTwiggy // Twiggy drive (presumably for Lisa unless you're lucky enough to have a Twiggy Mac)
+};
+
 // The structure of a DC42 disk image header
 struct DC42Header {
     uint8_t nameLength;
@@ -209,6 +230,7 @@ struct DiskImageMetadata {
     DC42Header header;
     ImageType imageType;
     DriveType driveType;
+    SystemType systemType;
     bool tagsPresent;
     bool diskInserted = false;
     uint32_t startAddress; // The starting address of the disk image in the SD card file system
@@ -222,4 +244,12 @@ struct SdTaskParams {
     GcrSector (&trackBufferGCR)[2][22]; // We also need to pass in references to the two track buffers
     DecodedSector (&trackBufferDecoded)[2][22];
     DiskImageMetadata* diskMetadata[2]; // A pointer to the disk metadata structs for both drives
+};
+
+// This is the ConfigSettings struct that holds all of ESFloppy's configuration settings
+// They're all stored in non-volatile storage so that they persist across power cycles
+struct ConfigSettings {
+    uint32_t emulMode; // The emulation mode that ESFloppy is currently in
+    uint32_t brightness; // The brightness of the OLED
+    bool dimDisplay; // Whether or not the OLED should be dimmed after a period of inactivity
 };

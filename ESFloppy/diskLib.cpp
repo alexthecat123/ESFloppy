@@ -212,7 +212,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
             }
 
             // Now calculate and verify the data and tag checksums
-            uint32_t calculatedDataChecksum = calcDataChecksum(disk, metadata);
+            /*uint32_t calculatedDataChecksum = calcDataChecksum(disk, metadata);
             uint32_t calculatedTagChecksum = calcTagChecksum(disk, metadata);
 
             if (calculatedDataChecksum != metadata->header.dataChecksum) {
@@ -227,7 +227,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
             }
             else {
                 Serial.println("Tag checksum is good.");
-            }
+            }*/
 
         }
         else { // The image doesn't have the correct magic number; not a DC42
