@@ -211,6 +211,18 @@ enum EmulMode {
     ModeTwiggy // Twiggy drive (presumably for Lisa unless you're lucky enough to have a Twiggy Mac)
 };
 
+// An enum for the different results that can happen when we try to open a disk image
+enum OpenResult {
+    ResultSuccess, // The image was opened successfully
+    ResultFailedOpen, // The image file failed to open (the disk->open call failed)
+    ResultNotContiguous, // The image file isn't contiguous on the SD card
+    ResultInvalidTagSize, // The tag size in the DC42 header is invalid for the given disk type
+    ResultInvalidDiskEncoding, // The disk encoding in the DC42 header is invalid for the given disk type
+    ResultInvalidDiskFormat, // The disk format in the DC42 header is invalid for a Twiggy image
+    ResultDARTNotSupported, // The image is an (unsupported) DART image
+    ResultInvalidImageSize // The image size isn't valid for any supported drive type
+};
+
 // The structure of a DC42 disk image header
 struct DC42Header {
     uint8_t nameLength;

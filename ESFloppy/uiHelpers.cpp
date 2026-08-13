@@ -214,12 +214,106 @@ static const uint8_t happyMacIconBits[] = {
     0xFE, 0xFF, 0xFF, 0x00,
 };
 
+// A microSD card with a question mark on it for the SD card error screen
+static const uint8_t sdErrorIconBits[] = {
+    0xF8, 0xFF, 0xFF, 0x01,
+    0x08, 0x00, 0x00, 0x01,
+    0x08, 0x00, 0x00, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x48, 0x55, 0x15, 0x01,
+    0x08, 0x00, 0x00, 0x01,
+    0x08, 0x00, 0x00, 0x01,
+    0x08, 0x00, 0x00, 0x01,
+    0x08, 0x00, 0x00, 0x01,
+    0x04, 0xF8, 0x00, 0x01,
+    0x02, 0x8C, 0x01, 0x01,
+    0x01, 0x8C, 0x01, 0x01,
+    0x01, 0xC0, 0x00, 0x01,
+    0x01, 0x60, 0x00, 0x01,
+    0x01, 0x30, 0x00, 0x01,
+    0x01, 0x30, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01,
+    0x02, 0x30, 0x00, 0x01,
+    0x04, 0x30, 0x00, 0x01,
+    0x08, 0x00, 0x00, 0x01,
+    0x04, 0x00, 0x00, 0x01,
+    0x02, 0x00, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01,
+    0xFF, 0xFF, 0xFF, 0x01,
+};
+
+// A big X icon with a circle around it for the error screen
+static const uint8_t errorIconBits[] = {
+    0x00, 0xF8, 0x03, 0x00,
+    0x00, 0xFF, 0x1F, 0x00,
+    0xC0, 0x07, 0x7C, 0x00,
+    0xE0, 0x01, 0xF0, 0x00,
+    0x70, 0x00, 0xC0, 0x01,
+    0x38, 0x00, 0x80, 0x03,
+    0x1C, 0x00, 0x00, 0x07,
+    0x8C, 0x01, 0x60, 0x06,
+    0x0E, 0x03, 0x30, 0x0E,
+    0x06, 0x06, 0x18, 0x0C,
+    0x06, 0x0C, 0x0C, 0x0C,
+    0x03, 0x18, 0x06, 0x18,
+    0x03, 0x30, 0x03, 0x18,
+    0x03, 0xE0, 0x01, 0x18,
+    0x03, 0xC0, 0x00, 0x18,
+    0x03, 0xE0, 0x01, 0x18,
+    0x03, 0x30, 0x03, 0x18,
+    0x03, 0x18, 0x06, 0x18,
+    0x06, 0x0C, 0x0C, 0x0C,
+    0x06, 0x06, 0x18, 0x0C,
+    0x0E, 0x03, 0x30, 0x0E,
+    0x8C, 0x01, 0x60, 0x06,
+    0x1C, 0x00, 0x00, 0x07,
+    0x38, 0x00, 0x80, 0x03,
+    0x70, 0x00, 0xC0, 0x01,
+    0xE0, 0x01, 0xF0, 0x00,
+    0xC0, 0x07, 0x7C, 0x00,
+    0x00, 0xFF, 0x1F, 0x00,
+    0x00, 0xF8, 0x03, 0x00,
+};
+
+// The folder icon drawn in menu items in the file picker
+static const uint8_t folderIconBits[] = {
+    0x07,
+    0xF9,
+    0x81,
+    0x81,
+    0x81,
+    0xFF,
+};
+
+// The up arrow icon drawn in the ".." menu item in the file picker
+static const uint8_t upOneLevelIconBits[] = {
+    0x10,
+    0x38,
+    0x7C,
+    0x10,
+    0x10,
+    0x1E,
+    0x00,
+};
+
+// Whether each button is currently being held down, after accounting for debounce; used in getButtonStates and getButtonHeld
+static bool buttonHeld[3] = {false, false, false};
+
 // Reads the current state of the buttons and returns them in the buttonStates array
 // This also accounts for auto-repeat so that if a button is held down, it will repeatedly return true for that button after a certain period
 void getButtonStates(bool buttonStates[3]) {
     static uint32_t lastEventTime[3] = {0, 0, 0}; // The last time (in ms) that each button fired a press event
     static uint32_t lastChangeTime[3] = {0, 0, 0}; // The last time (in ms) that each button's raw state changed; used for debouncing
-    static bool buttonHeld[3] = {false, false, false}; // Whether each button is currently being held down, after accounting for debounce
     static bool rawPreviousStates[3] = {false, false, false}; // The raw (pre-debounce) state from the previous call
     static bool repeating[3] = {false, false, false}; // Whether each button has already started auto-repeating
     static bool repeatAllowed[3] = {true, false, true}; // Whether we want to even allow auto-repeat for each button to begin with; yet for all but SEL
@@ -279,6 +373,14 @@ void getButtonStates(bool buttonStates[3]) {
     }
 }
 
+// Returns the current state of the button given by button, but just its debounced level, not edges
+bool getButtonHeld(uint32_t button) {
+    if (button > 2) {
+        return false; // If the button number is invalid, just return false
+    }
+    return buttonHeld[button]; // Otherwise, return the actual debounced button state
+}
+
 // This function draws the Sony floppy icon on the OLED at the specified x/y coordinates, optionally in inverse video
 void drawSonyIcon(uint32_t x, uint32_t y, bool inverseVideo) {
     if (inverseVideo) {
@@ -312,6 +414,27 @@ void drawHappyMacIcon(uint32_t x, uint32_t y) {
     OLED.drawXBM(x, y, HAPPYMAC_ICON_WIDTH, HAPPYMAC_ICON_HEIGHT, happyMacIconBits);
 }
 
+// Here's another that draws an SD card error icon
+void drawSDErrorIcon(uint32_t x, uint32_t y) {
+    OLED.drawXBM(x, y, SD_ERROR_ICON_WIDTH, SD_ERROR_ICON_HEIGHT, sdErrorIconBits);
+}
+
+// And this one draws the big circled X used on the general error screen
+void drawErrorIcon(uint32_t x, uint32_t y) {
+    OLED.drawXBM(x, y, ERROR_ICON_WIDTH, ERROR_ICON_HEIGHT, errorIconBits);
+}
+
+// This one draws the folder icon for directories in the file picker
+// The y coordinate represents the top of the menu row, not the top of the icon
+void drawFolderIcon(uint32_t x, uint32_t y) {
+    OLED.drawXBM(x, y + 1 + ((7 - FOLDER_ICON_HEIGHT) / 2), FOLDER_ICON_WIDTH, FOLDER_ICON_HEIGHT, folderIconBits);
+}
+
+// Here's the up arrow icon for the ".." menu entry, once again with the y coordinate being the top of the menu row
+void drawUpOneLevelIcon(uint32_t x, uint32_t y) {
+    OLED.drawXBM(x + (FOLDER_ICON_WIDTH - UP_ONE_LEVEL_ICON_WIDTH), y + 1 + ((7 - UP_ONE_LEVEL_ICON_HEIGHT) / 2), UP_ONE_LEVEL_ICON_WIDTH, UP_ONE_LEVEL_ICON_HEIGHT, upOneLevelIconBits);
+}
+
 // This is a bitmask representing which pages of the OLED are dirty and need to be resent to the display
 // We need this because it's too slow to send the whole display out over I2C in one go, so we just send a single page at a time
 // Each page is 8 pixels tall, so there are 8 pages in total on our 64-pixel display
@@ -341,16 +464,24 @@ void markRegionDirty(uint32_t yStart, uint32_t yEnd) {
 // Sends a page of data to the OLED over I2C if there are any pages marked as dirty; returns true if it actually sent something and false if not
 // Note that this only sends one page per call even if multiple are dirty so that it doesn't block the SD card task for more than about 3ms per call
 bool sendOneOLEDPage() {
+    static uint32_t nextPage = 0; // The next page to check if we need to send
     if (dirtyPages == 0) {
         return false; // If there are no dirty pages, there's nothing to do, so just return false
     }
-    for (uint8_t page = 0; page < 8; page++) {
+    for (uint8_t i = 0; i < 8; i++) {
         // Otherwise, iterate through all 8 pages that fit on the display and see if any of them are dirty
+        // Note that we start with nextPage (which increments on every iteration) so that we don't always send the same page first
+        // If we did this, it would cause problems; say that on every call all 8 pages were dirty
+        // It would always just send page 0 and then exit, so the other 7 would never get sent
+        // But if we always start with a different page, then eventually all of them will get sent out
+        uint32_t page = (nextPage + i) & 7;
         if (dirtyPages & (1 << page)) {
             // If a page is dirty, then call updateDisplayArea to send it out to the OLED
             // updateDisplayArea works in 8x8 tiles, so we're telling it to send 16 8x8 tiles horizontally and 1 tile vertically to redraw the page
             OLED.updateDisplayArea(0, page, 16, 1);
             dirtyPages &= ~(1 << page); // Once the page has been sent, clear its dirty bit
+            // Now increment nextPage to the next page, wrapping around if necessary
+            nextPage = (page + 1) & 7;
             return true; // And return true since we actually sent something
         }
     }
@@ -398,17 +529,20 @@ uint32_t drawInvertedString(uint32_t x, uint32_t y, const char* text, bool fullW
 
 // Draws a menu row at the specified y coordinate, in inverse video if it's selected
 // Just like drawClippedText, this also supports a charOffset for horizontal scrolling of the text and returns the full string width
-uint32_t drawMenuRow(uint32_t y, const char* text, uint32_t charOffset, bool selected) {
+uint32_t drawMenuRow(uint32_t y, const char* text, uint32_t charOffset, bool selected, uint32_t reservedWidth) {
+    // Rows that carry an icon at their right-hand end reserve some space for it, so shorten the text window by that much
+    // Note that the inverse video box is still the full width of the display; only the text gets clipped short
+    uint32_t textWidth = OLED.getDisplayWidth() - reservedWidth;
     if (selected) {
         // If the item is selected, then draw it in inverse video
         OLED.drawBox(0, y, OLED.getDisplayWidth(), MENU_ITEM_HEIGHT); // Start by drawing a the white box
         OLED.setDrawColor(0); // Set the draw color to black
-        uint32_t fullWidth = drawClippedText(0, y, OLED.getDisplayWidth(), text, charOffset); // Then draw the black text inside it
+        uint32_t fullWidth = drawClippedText(0, y, textWidth, text, charOffset); // Then draw the black text inside it
         OLED.setDrawColor(1); // And finally set the draw color back to white for the rest of the UI
         return fullWidth; // Return the full string width so the caller can determine if it needs to scroll
     } else {
         // If the item isn't selected, then just draw it normally
         // And return the string width too
-        return drawClippedText(0, y, OLED.getDisplayWidth(), text, charOffset);
+        return drawClippedText(0, y, textWidth, text, charOffset);
     }
 }

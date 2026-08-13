@@ -26,8 +26,9 @@ ConfigSettings readConfig() {
     }
     // If it does exist, then read the configStruct key from NVS into the settings struct
     uint32_t retrievedBytes =preferences.getBytes("configStruct", &settings, sizeof(settings));
-    if (retrievedBytes != sizeof(settings)) {
+    if (retrievedBytes != sizeof(settings) || (settings.emulMode != ModeSonyLisa && settings.emulMode != ModeSonyMac && settings.emulMode != ModeTwiggy)) {
         // If the number of bytes read from NVS doesn't match the size of the settings struct, then something is wrong
+        // Also assume a problem if the emulMode isn't one of the valid values because this will cause the loop() to not execute any of the drive loops
         // Just return default values in this case as well
         settings.emulMode = ModeSonyLisa; // Default to a Lisa Sony drive
         settings.dimDisplay = true;

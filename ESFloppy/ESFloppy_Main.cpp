@@ -26,6 +26,9 @@ static volatile SdTaskInterface sdTaskInterface = {0, 0, 1, 1, READ_TRACK, false
 // Make an instance of the SdTaskParams struct and initialize it with the appropriate pointers
 SdTaskParams sdTaskParams = {&sdTaskInterface, trackBufferGCR, trackBufferDecoded, {diskMetadataPointers[0], diskMetadataPointers[1]}};
 
+// This is the struct that holds all of the system settings that are saved to NVS and loaded on boot
+extern ConfigSettings configSettings;
+
 void setup() {
     init(); // Init the ESP32 Arduino core
     initLEDC(RDA); // Initialize the LEDC peripheral on the RDA pin for sending TACH pulses
@@ -58,12 +61,12 @@ void setup() {
 }
 
 __attribute__((optimize("Ofast"))) IRAM_ATTR void loop() {
-    // In the main loop here, we just need to run the appropriate drive interface loop based on the drive type of the open disk image
-    if (diskMetadataPointers[1]->driveType == Drive400 || diskMetadataPointers[1]->driveType == Drive800) {
+    // In the main loop here, we just need to run the appropriate drive interface loop based on the emulation mode set in configSettings
+    if (configSettings.emulMode == ModeSonyLisa || configSettings.emulMode == ModeSonyMac) {
         // If it's a 400K or 800K disk, then run the Sony loop
         sonyLoop(&sdTaskInterface, trackBufferGCR, diskMetadataPointers);
     }
-    else if (diskMetadataPointers[1]->driveType == DriveTwiggy) {
+    else if (configSettings.emulMode == ModeTwiggy) {
         // If it's a Twiggy disk, then run the Twiggy loop (duh)
         twiggyLoop(&sdTaskInterface, trackBufferGCR, diskMetadataPointers);
     }

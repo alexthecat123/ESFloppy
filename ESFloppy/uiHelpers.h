@@ -19,10 +19,22 @@ extern U8G2_SH1106_128X64_NONAME_F_HW_I2C OLED;
 #define LISA2_ICON_HEIGHT 24
 #define HAPPYMAC_ICON_WIDTH 25
 #define HAPPYMAC_ICON_HEIGHT 32
+#define SD_ERROR_ICON_WIDTH 25
+#define SD_ERROR_ICON_HEIGHT 34
+#define ERROR_ICON_WIDTH 29
+#define ERROR_ICON_HEIGHT 29
+// These are more icons, but they're a lot smaller because they have to fit within the menu rows
+#define FOLDER_ICON_WIDTH 8
+#define FOLDER_ICON_HEIGHT 6
+#define UP_ONE_LEVEL_ICON_WIDTH 7
+#define UP_ONE_LEVEL_ICON_HEIGHT 7
 
 // Reads the current state of the buttons and returns them in the buttonStates array
 // This also accounts for auto-repeat so that if a button is held down, it will repeatedly return true for that button after a certain period
 void getButtonStates(bool buttonStates[3]);
+
+// Returns the current state of the button given by button, but just its debounced level, not edges
+bool getButtonHeld(uint32_t button);
 
 // This function draws the Sony floppy icon on the OLED at the specified x/y coordinates and optionally in inverse video
 void drawSonyIcon(uint32_t x, uint32_t y, bool inverseVideo);
@@ -38,6 +50,19 @@ void drawLisa2Icon(uint32_t x, uint32_t y);
 
 // And finally, a Happy Mac icon
 void drawHappyMacIcon(uint32_t x, uint32_t y);
+
+// Here's another that draws an SD card error icon
+void drawSDErrorIcon(uint32_t x, uint32_t y);
+
+// And this one draws the big circled X used on the general error screen
+void drawErrorIcon(uint32_t x, uint32_t y);
+
+// This one draws the folder icon for directories in the file picker
+// The y coordinate represents the top of the menu row, not the top of the icon
+void drawFolderIcon(uint32_t x, uint32_t y);
+
+// Here's the up arrow icon for the ".." menu entry, once again with the y coordinate being the top of the menu row
+void drawUpOneLevelIcon(uint32_t x, uint32_t y);
 
 // This function is really simple; it just marks every single page as dirty to force the entire display to be resent
 void markAllPagesDirty();
@@ -61,4 +86,5 @@ uint32_t drawInvertedString(uint32_t x, uint32_t y, const char* text, bool fullW
 
 // Draws a menu row at the specified y coordinate, in inverse video if it's selected
 // Just like drawClippedText, this also supports a charOffset for horizontal scrolling of the text and returns the full string width
-uint32_t drawMenuRow(uint32_t y, const char* text, uint32_t charOffset, bool selected);
+// reservedWidth is how many pixels to keep clear at the right-hand end of the row for an icon; the inverse video box is still full width either way
+uint32_t drawMenuRow(uint32_t y, const char* text, uint32_t charOffset, bool selected, uint32_t reservedWidth = 0);

@@ -5,6 +5,8 @@
 #include "diskLib.h"
 #include "types.h"
 #include "ui.h"
+#include "uiErrorScreen.h"
+#include "uiFilePicker.h"
 #include "uiHelpers.h"
 #include "uiSettingsMenu.h"
 #include "uiState.h"
@@ -15,10 +17,6 @@
 // Note that this is NOT the max directory depth, which is something completely different and is handled within the file browser screen itself
 // This is just the total number of "high-level" screens that we can have on the stack, like status, file browser, and settings
 #define SCREEN_STACK_SIZE 8
-
-// How long (in ms) a long filename sits still before it starts scrolling, and how long each step takes
-#define SCROLL_PAUSE 2400
-#define SCROLL_STEP 120
 
 #define WRITE_INDICATOR_DURATION 500 // How long (in ms) the write indicator stays on after a write occurs
 
@@ -38,6 +36,9 @@ static bool redrawScreen = true;
 // These are the same ones that are set up in SDTask and used throughout the emulator, but we need them here too
 extern DiskImageMetadata* diskMetadataPointers[2];
 extern File32 disk[2];
+
+// This is the struct that holds all of the system settings that are saved to NVS and loaded on boot
+ConfigSettings configSettings;
 
 // The real-time status of the drives, straight from sonyInterface and twiggyInterface, so we can show it on the status screen
 // These are literally just the TrackParams and BufferStatus structs used internally by the drive interfaces, so they're always fully up to date
@@ -70,6 +71,22 @@ Screen statusScreen = {
     statusTick,
     statusButtonPress,
     statusDrawScreen
+};
+
+// The file picker screen is probably pretty self-explanatory; it's what lets the user choose what image they want to insert into a drive
+Screen filePickerScreen = {
+    filePickerEnter,
+    filePickerTick,
+    filePickerButtonPress,
+    filePickerDrawScreen
+};
+
+// The error screen that we show when something goes wrong, complete with a custom message and X icon
+Screen errorScreen = {
+    errorEnter,
+    errorTick,
+    errorButtonPress,
+    errorDrawScreen
 };
 
 // Marks the whole screen as dirty and needing to be redrawn/sent to the OLED
@@ -116,8 +133,7 @@ void popScreen() {
 
 // Returns true if we're emulating Twiggies rather than a Sony; I'm getting really tired of typing metadata->driveType == DriveTwiggy all over the place
 static bool twiggyMode() {
-    // Notice that we check the drive type of drive 1 only; this is because in Sony mode, this is the only drive that actually exists
-    return diskMetadataPointers[1]->driveType == DriveTwiggy;
+    return configSettings.emulMode == ModeTwiggy;
 }
 
 // Returns how many drives the current emulation mode actually has; Twiggy has two, Sony has one
@@ -143,8 +159,6 @@ static BufferStatus* getBufferStatus() {
     return twiggyMode() ? twiggyUiBufferStatus : sonyUiBufferStatus;
 }
 
-// This is the struct that holds all of the system settings that are saved to NVS and loaded on boot
-ConfigSettings configSettings;
 uint32_t welcomeStartTime = 0; // The time at which we entered the welcome screen, so we can tell how long we've been on it
 uint32_t lastInteractionTime = 0; // The last time there was any user or disk interaction; used to determine when to dim the display
 
@@ -248,7 +262,11 @@ static uint32_t writeIndicatorStopTime[2]; // The time at which the write indica
 static bool lastWriteIndicator[2]; // The last state of the write indicator for each drive, so we can tell when it changes and needs to be redrawn
 static uint32_t scrollOffset[2]; // How far in characters each drive's filename has scrolled so far
 static uint32_t scrollTime[2]; // When the last scroll step happened for each drive's filename
-static uint32_t selectedDrive = 0; // Which drive is currently selected for the user to interact with; not relevant for Sony mode
+uint32_t selectedDrive = 1; // Which drive is currently selected for the user to interact with; not relevant for Sony mode
+static uint32_t selHoldTime = 0; // How long SEL has been held down for; used to check for long presses
+static bool selPressed = false; // Whether the SEL button is currently held down to begin with
+static bool selActedUpon = false; // Whether or not we've already acted upon a SEL button press yet
+static uint32_t selTargetDrive = 0; // The drive that's being targeted by the current SEL press
 
 // This function refreshes the filename of the disk image that's inserted into the given drive
 // This actually accesses the filesystem, so it can be slow and should only be called when the image has changed
@@ -293,7 +311,7 @@ static void buildTypeString(uint32_t drive, char* outString, uint32_t length) {
 /*
 |------| 0 LOS 1.0.dc42
 | Icon | Twiggy DC42+Tags
-|______| Trk 00 Side 0 Idle
+|______| Trk 00 S0 Idle
 */
 static void drawDriveCompact(uint32_t drive, uint32_t y, uint32_t currentTime) {
     char buffer[40]; // Use this temp buffer to build some of the lines of text that we need to draw
@@ -465,6 +483,10 @@ void statusEnter() {
         lastSide[drive] = getTrackParams(drive)->side;
         lastMotorState[drive] = getTrackParams(drive)->motorOn;
     }
+    // Reset the SEL hold-detection state variables too so that we don't accidentally mis-detect a hold when entering this screen
+    selHoldTime = 0;
+    selPressed = false;
+    selActedUpon = false;
     redrawWholeScreen(); // Mark the whole screen as dirty so that it gets fully redrawn next time the UI updates
 }
 
@@ -568,13 +590,16 @@ void statusButtonPress(bool buttonStates[3]) {
     if (!twiggyMode()) {
         // If we're in Sony mode, then the only button that does anything is the SEL button
         // If a disk is inserted, then pressing SEL will force an eject of that disk
+        selectedDrive = 1; // The only drive in Sony mode is drive 1, so make sure it's always the one selected for interaction
         if (buttonStates[1] && diskMetadataPointers[1]->diskInserted) {
             TrackParams* params = getTrackParams(1); // Get the trackParams for drive 1, which is the only drive in Sony mode
             params->ejectRequested = EjectForce; // Set the ejectRequested flag to EjectForce to force an eject
         }
-        // If no disk is inserted, then pressing SEL will bring up the file browser so the user can select a disk to insert
+        // If no disk is inserted, then pressing SEL will bring up the file picker so the user can select a disk to insert
         else if (buttonStates[1] && !diskMetadataPointers[1]->diskInserted) {
-            // pushScreen(&fileBrowserScreen); // TODO: waiting on the file browser screen
+            // Reset the file picker to the root directory before we push it
+            filePickerReset();
+            pushScreen(&filePickerScreen);
         }
     } else {
         // In Twiggy mode, the user can select which drive they want to interact with using the left and right buttons
@@ -587,9 +612,40 @@ void statusButtonPress(bool buttonStates[3]) {
             selectedDrive = (selectedDrive + 1) % getDriveCount();
             redrawWholeScreen(); // Force a full redraw here too
         }
-        // The user can press SEL here too, in which case we should pop up the menu for this particular drive
+        // The user can press SEL here too, in which case we should eject the disk if there's one in place
+        // There are two types of ejects that can happen here: a normal eject if the user presses SEL once, or a force eject if they hold it for LONG_PRESS_DURATION ms
         if (buttonStates[1]) {
-            // pushScreen(&menuScreen); // TODO: waiting on the menu screen
+            // If the user presses SEL, then record the time that it went down and mark that SEL is now held down if there's a disk inserted
+            if (diskMetadataPointers[selectedDrive]->diskInserted) {
+                selHoldTime = millis();
+                selPressed = true;
+                selActedUpon = false; // And that we haven't taken any action on it yet
+                // Also set the current drive as the target drive for the SEL press so that it doesn't change if the user presses LEFT/RIGHT while holding SEL
+                selTargetDrive = selectedDrive;
+            } else {
+                // If there's no disk inserted, then just bring up the file picker so the user can select a disk to insert
+                // Reset the file picker to the root directory before we push it
+                filePickerReset();
+                pushScreen(&filePickerScreen);
+            }
+        } else if (selPressed && getButtonHeld(1)) {
+            // If selHeld says that SEL is held down and the debounced button state agrees, then check to see how long it's been down for
+            if (!selActedUpon && (millis() - selHoldTime >= LONG_PRESS_DURATION)) {
+                // If it's been held down for long enough and we haven't acted upon it yet, then force an eject of the disk in selTargetDrive
+                TrackParams* params = getTrackParams(selTargetDrive);
+                params->ejectRequested = EjectForce; // Set the ejectRequested flag to EjectForce to force an eject
+                selActedUpon = true; // And mark that we've acted upon the press so we don't do it again
+            }
+        } else if (selPressed) {
+            // Otherwise, if selPressed says that it's held, but it's not actually held down anymore, then we need to perform the short-press action
+            // But only if we haven't already done the long-press action
+            selPressed = false;
+            if (!selActedUpon) {
+                selActedUpon = true;
+                // If the user just briefly pressed SEL, then do a normal eject instead of a force eject
+                TrackParams* params = getTrackParams(selTargetDrive);
+                params->ejectRequested = EjectNormal; // Set the ejectRequested flag to EjectNormal to request a normal eject
+            }
         }
     }
 }

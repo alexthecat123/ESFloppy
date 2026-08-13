@@ -6,6 +6,12 @@
 
 #define MENU_ITEM_HEIGHT 8 // The height of a single menu item in pixels
 
+// How long (in ms) a long filename sits still before it starts scrolling, and how long each step takes
+#define SCROLL_PAUSE 2400
+#define SCROLL_STEP 120
+
+#define LONG_PRESS_DURATION 1000 // How long (in ms) the user has to hold the SEL button to trigger a long press
+
 // This struct represents a screen in the UI
 struct Screen {
     void (*enter)(void); // Pointer to the function that gets called when we enter this screen
@@ -27,7 +33,7 @@ struct Menu;
 
 // This struct represents a single item in a scrollable menu
 struct MenuItem {
-    const char* label; // The text label for this item
+    char* label; // The text label for this item
     MenuItemType type; // The type of this item
     void* value; // The boolean value, numeric value, or enum value that this item actually sets for Menu_Toggle, Menu_Numeric, and Menu_Enum
     uint32_t minValue; // The minimum value for Menu_Numeric items

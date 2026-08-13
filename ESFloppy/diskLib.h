@@ -9,7 +9,7 @@ __attribute__((optimize("Ofast"))) uint32_t calcTagChecksum(File32* disk, DiskIm
 
 // This function opens a disk image file and determines its type (raw or DC42)
 // If there are any errors, it returns false; otherwise, it returns true
-bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata);
+OpenResult openImage(char* filename, File32* disk, DiskImageMetadata* metadata);
 
 // Reads an entire track (both sides if 800K or Twiggy disk) from the disk image into a DecodedSector array
 __attribute__((optimize("Ofast"))) void readTrack(uint8_t track, File32* disk, DecodedSector sectors[2][22], DiskImageMetadata* metadata);

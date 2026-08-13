@@ -19,6 +19,10 @@ void redrawWholeScreen();
 // This is much more efficient than redrawing the whole screen, and avoids blocking the SD task for the time of a full frame
 void redrawRegion(uint32_t yStart, uint32_t yEnd);
 
+// The error screen that can be pushed onto the screen stack to show an error message to the user
+// Anything that wants to use it just fills in the errorMessageLines array with the text to show and then calls pushScreen
+extern Screen errorScreen;
+
 // This function pushes a new screen onto the screen stack and makes it the current screen
 void pushScreen(Screen* newScreen);
 

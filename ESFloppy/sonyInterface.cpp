@@ -88,17 +88,23 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
             trackParams.pendingDispatch = false; // Clear the pendingDispatch flag since we just dispatched it
         }
 
+        // If the user has requested a force eject of the disk through the UI, then go ahead and do it
+        // Make sure to do this regardless of whether the drive is enabled or not
+        if (trackParams.ejectRequested == EjectForce) {
+            if (!metadata[1]->diskInserted) {
+                // If the disk isn't inserted, then just clear the ejectRequested flag and do nothing
+                trackParams.ejectRequested = EjectNone;
+            } else {
+                ejectDisk(sdTaskInterface);
+            }
+        }
+
         if ((gpioIn & (1 << DR1)) == 0) { // If the drive is enabled, then we need to check for commands
 
             // If WRQ is low (Lisa is trying to write) or we have stashed sectors to write out, then call receiveSector to handle it
             if (((gpioIn & (1 << WRQ)) == 0) || bufferStatus.stashCount > 0) {
                 receiveSector(trackBufferGCR, sdTaskInterface, &trackParams, &bufferStatus, metadata[1]);
                 return; // This makes sure that we refresh gpioIn with an updated read after we get back from receiveSector
-            }
-
-            // If the user has requested a force eject of the disk through the UI, then go ahead and do it
-            if (trackParams.ejectRequested == EjectForce) {
-                ejectDisk(sdTaskInterface);
             }
                 
             currLSTRB = (gpioIn & (1 << PH3)) ? 1 : 0; // Read the current state of LSTRB (PH3)

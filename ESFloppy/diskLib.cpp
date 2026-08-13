@@ -90,20 +90,21 @@ __attribute__((optimize("Ofast"))) uint32_t calcTagChecksum(File32* disk, DiskIm
 }
 
 // This function opens a disk image file and determines its type (raw or DC42)
-// If there are any errors, it returns false; otherwise, it returns true
-bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
+// If there are any errors, it returns what the error was; otherwise, it returns true
+OpenResult openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
     // openImage clobbers the rawDataBuffer, so set lastReadTrack to an invalid value so that writeTrack() will read the data sectors again
     lastReadTrack = 0xFFFFFFFF;
     lastReadDrive = metadata->driveIndex; // And set lastReadDrive to the current drive
+    metadata->diskInserted = false; // Mark the disk as not inserted until we successfully open it
     if(!disk->open(filename, O_RDWR)){ // Try opening the specified disk image file
         Serial.printf("Failed to open image file %s!\n", filename);
         disk->close();
-        return false; // Return false on failure
+        return ResultFailedOpen;
     }
     if (!disk->contiguousRange(&metadata->startAddress, &metadata->endAddress)) {
         Serial.println("Image file isn't contiguous!");
         disk->close();
-        return false;
+        return ResultNotContiguous;
     }
     // If we succeed, we need to check if it's a DC42 image
     if(disk->fileSize() >= sizeof(DC42Header)) { // Make sure the file is big enough to contain a DC42 header
@@ -157,7 +158,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
                 else {
                     Serial.printf("ERROR: Invalid tag size for 400K DC42 image; tag size is %d bytes!\n", metadata->header.tagSize);
                     disk->close();
-                    return false;
+                    return ResultInvalidTagSize;
                 }
             }
             // Now repeat that whole process for 800K images
@@ -175,7 +176,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
                 else {
                     Serial.printf("ERROR: Invalid tag size for 800K DC42 image; tag size is %d bytes!\n", metadata->header.tagSize);
                     disk->close();
-                    return false;
+                    return ResultInvalidTagSize;
                 }
             }
             // And finally one more time for Twiggy images
@@ -187,7 +188,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
                 if (metadata->header.diskFormat > 2) {
                     Serial.printf("ERROR: Invalid disk format of %02x for Twiggy DC42 image!\n", metadata->header.diskFormat);
                     disk->close();
-                    return false;
+                    return ResultInvalidDiskFormat;
                 }
                 if (metadata->header.tagSize == TAG_SIZE_TWIGGY) {
                     metadata->tagsPresent = true;
@@ -202,13 +203,13 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
                 else {
                     Serial.printf("ERROR: Invalid tag size for Twiggy DC42 image; tag size is %d bytes!\n", metadata->header.tagSize);
                     disk->close();
-                    return false;
+                    return ResultInvalidTagSize;
                 }
             }
             else {
                 Serial.printf("ERROR: Invalid disk encoding or data size for DC42 image; encoding is %02x and data size is %d bytes!\n", metadata->header.diskEncoding, metadata->header.dataSize);
                 disk->close();
-                return false;
+                return ResultInvalidDiskEncoding;
             }
 
             // Now calculate and verify the data and tag checksums
@@ -236,7 +237,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
             if ((metadata->header.nameLength == 1 || metadata->header.nameLength == 2 || metadata->header.nameLength == 3) && (metadata->header.volumeName[0] == 16 || metadata->header.volumeName[0] == 17 || metadata->header.volumeName[0] == 18)) {
                 Serial.println("ERROR: DART disk images are not supported!");
                 disk->close();
-                return false;
+                return ResultDARTNotSupported;
             }
             // Otherwise, it's probably just a raw image
             // Before we assume that though, let's make sure it's a valid size for a 400K, 800K, or Twiggy disk image (although I've never heard of a raw Twiggy image before)
@@ -256,7 +257,7 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
                 // If it's none of the above, then it's an invalid image size and we'll have to reject it
                 Serial.printf("ERROR: Image size isn't a valid floppy disk size; it's %d bytes!!!\n", disk->fileSize());
                 disk->close();
-                return false; // So return false
+                return ResultInvalidImageSize; // So return false
             }
             // If we get here, it's a valid raw image
             metadata->imageType = RAW; // So set imageType to RAW to indicate raw
@@ -266,10 +267,10 @@ bool openImage(char* filename, File32* disk, DiskImageMetadata* metadata) {
     else { // The image is so small that it isn't even big enough to contain a DC42 header; it's definitely invalid
         Serial.printf("ERROR: Image size isn't a valid floppy disk size; it's only %d bytes!!!\n", disk->fileSize());
         disk->close();
-        return false; // So return false
+        return ResultInvalidImageSize; // So return false
     }
     metadata->diskInserted = true; // Mark the disk as inserted
-    return true; // And return true on success
+    return ResultSuccess; // And return true on success
 }
 
 // Reads an entire track (both sides if 800K or Twiggy disk) from the disk image into a DecodedSector array

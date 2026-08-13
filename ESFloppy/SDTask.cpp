@@ -8,6 +8,7 @@
 #include "SDTask.h"
 #include "types.h"
 #include "ui.h"
+#include "uiHelpers.h"
 
 // The SD card, OLED, and serial task that runs on the other core
 // It handles reading/writing tracks to the SD card, updating the OLED, and handling serial comms
@@ -115,54 +116,33 @@ void sdCardTask(void* params) {
     // And now move onto the SD card
     if (!SDCard.begin(SD_CONFIG)) { // Initialize the SD card with our hardware SPI instance
         Serial.println("SD card initialization failed! Halting..."); // And print an error/go into an infinite loop on failure
+        // Display an error message and the "bad SD card" icon on the OLED as well
         OLED.clearBuffer();
-        OLED.drawStr( 0, 0, "SD init failed!");
+        OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("SD card init failed!")) / 2), 0, "SD card init failed!");
+        OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Is a card inserted?")) / 2), MENU_ITEM_HEIGHT * 1, "Is a card inserted?");
+        drawSDErrorIcon(((128 - SD_ERROR_ICON_WIDTH) / 2), ((MENU_ITEM_HEIGHT * 2) + (OLED.getDisplayHeight() - (MENU_ITEM_HEIGHT * 2) - SD_ERROR_ICON_HEIGHT) / 2));
         OLED.sendBuffer();
         while(1) {
-            // If we fail to init the SD card, then spin forever
             // Make sure to call vTaskDelay instead of just a plain while(1) loop so that the watchdog doesn't reset the ESP32
             vTaskDelay(1);
         }
     }
     card = SDCard.card(); // Now that the card is initialized, store a pointer to its object
-    rootDir.open("/"); // Then open the card's root directory
-    //My Lisa Stuff/MWP/MW_1.018_Install.img
-    //test_image.dc42
-    //My Lisa Stuff/LOS 3 Debozoed/LisaCalc.dc42
-    //My Lisa Stuff/MacWorks Plus II Install.image
-    //LisaTest 3.0 1.image
-    //copy_image_800k.dc42
-    //Twiggy/LisaDraw 1.0.dc42
+    // Now try to open the SD card's root directory as an experiment to make sure that we can actually read from it
+    if (!rootDir.open("/")) {
+        // If we fail, then the SD card is bad or maybe has an unsupported filesystem, so print an error just like we did earlier and halt
+        Serial.println("Failed to open SD card root directory! Halting...");
+        OLED.clearBuffer();
+        OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Can't open SD root!")) / 2), 0, "Can't open SD root!");
+        OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Make sure it's FAT32.")) / 2), MENU_ITEM_HEIGHT * 1, "Make sure it's FAT32.");
+        drawSDErrorIcon(((128 - SD_ERROR_ICON_WIDTH) / 2), ((MENU_ITEM_HEIGHT * 2) + (OLED.getDisplayHeight() - (MENU_ITEM_HEIGHT * 2) - SD_ERROR_ICON_HEIGHT) / 2));
+        OLED.sendBuffer();
+        while(1) {
+            vTaskDelay(1);
+        }
+    }
     sdTaskParams->diskMetadata[0]->driveIndex = 0; // Set the drive index for the upper drive
-    if (!openImage("Twiggy/LisaGraph 1.0.dc42", &disk[0], sdTaskParams->diskMetadata[0])) { // And try opening a disk image file for the upper drive
-        Serial.println("Failed to open disk image for upper drive! Halting..."); // Give another error/infinite loop on failure
-        OLED.clearBuffer();
-        OLED.drawStr(0, 0, "Failed to open image!");
-        OLED.sendBuffer();
-        while(1) {
-            // If we fail to open the disk image, then spin forever
-            vTaskDelay(1);
-        }
-    }
-    sdTaskParams->diskMetadata[1]->driveIndex = 1; // Set the drive index for the lower/Sony drive
-    if (!openImage("Twiggy/LisaDraw 1.0.dc42", &disk[1], sdTaskParams->diskMetadata[1])) { // And the lower drive
-        Serial.println("Failed to open disk image for lower/Sony drive! Halting..."); // Give another error/infinite loop on failure
-        OLED.clearBuffer();
-        OLED.drawStr(0, 0, "Failed to open image!");
-        OLED.sendBuffer();
-        while(1) {
-            // If we fail to open the disk image, then spin forever
-            vTaskDelay(1);
-        }
-    }
-    // Mark the upper disk as inserted, but the lower one as not inserted; we'll insert it later on a couple-second delay in the main SD task
-    sdTaskParams->diskMetadata[0]->diskInserted = true;
-    sdTaskParams->diskMetadata[1]->diskInserted = false;
-    //sdTaskParams->diskMetadata[1]->diskInserted = true;
-    diskLoadingComplete = false; // Mark that we haven't finished loading the lower disk yet
-    // Read and encode track 0 so that we can start sending it out when the Lisa requests it
-    readTrack(0, &disk[sdTaskParams->sdTaskInterface->readDrive], sdTaskParams->trackBufferDecoded, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
-    encodeTrackToGCR(0, sdTaskParams->trackBufferDecoded, sdTaskParams->trackBufferGCR, sdTaskParams->diskMetadata[sdTaskParams->sdTaskInterface->readDrive]);
+    sdTaskParams->diskMetadata[1]->driveIndex = 1; // And also for the lower/Sony drive
     Serial.println("ESFloppy is ready!"); // And if all this succeeds, print a ready message
     // Make sure that everything above here is truly done before we continue
     __sync_synchronize();
@@ -184,10 +164,10 @@ void sdCardTask(void* params) {
                 debugTail = (debugTail + 1) & 15; // And move the tail pointer to the next message in the ring buffer
             }
             // If it's been 3 seconds since we started, then insert the lower Twiggy if it hasn't been inserted yet (and we're emulating Twiggies)
-            if ((esp_cpu_get_cycle_count() - diskInsertDelay) > 720000000 && !diskLoadingComplete && !sdTaskParams->diskMetadata[1]->diskInserted && sdTaskParams->diskMetadata[1]->driveType == DriveTwiggy) {
+            /*if ((esp_cpu_get_cycle_count() - diskInsertDelay) > 720000000 && !diskLoadingComplete && !sdTaskParams->diskMetadata[1]->diskInserted && sdTaskParams->diskMetadata[1]->driveType == DriveTwiggy) {
                 sdTaskParams->diskMetadata[1]->diskInserted = true; // Mark the lower disk as inserted
                 diskLoadingComplete = true; // And mark that we've finished loading the lower disk
-            }
+            }*/
             // Also call the uiUpdate function to update the OLED if necessary
             uiUpdate();
             vTaskDelay(1);

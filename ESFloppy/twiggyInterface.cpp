@@ -494,12 +494,17 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                 }
                 // Also eject the disk if the user has requested a force eject through the UI, regardless of anything else
                 if (trackParams[0].ejectRequested == EjectForce) {
-                    ejectDisk(0, sdTaskInterface, metadata[0]);
+                    if (metadata[0]->diskInserted) {
+                        // Only actually eject the disk if one is actually inserted; otherwise just clear the flag and move on
+                        ejectDisk(0, sdTaskInterface, metadata[0]);
+                    }
                     trackParams[0].ejectRequested = EjectNone; // Clear the ejectRequested flag so we don't keep ejecting
                 }
                 if (trackParams[1].ejectRequested == EjectForce) {
-                    ejectDisk(1, sdTaskInterface, metadata[1]);
-                    trackParams[1].ejectRequested = EjectNone;
+                    if (metadata[1]->diskInserted) {
+                        ejectDisk(1, sdTaskInterface, metadata[1]);
+                    }
+                    trackParams[1].ejectRequested = EjectNone; // Clear the ejectRequested flag so we don't keep ejecting
                 }
                 break;
             }
