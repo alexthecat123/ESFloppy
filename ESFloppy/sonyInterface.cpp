@@ -99,6 +99,13 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
             }
         }
 
+        // If the drive motor is on, then we want to blink the LED to indicate activity
+        if (trackParams.motorOn && ((esp_cpu_get_cycle_count() >> 25) & 1)) {
+            REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED);
+        } else {
+            REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
+        }
+
         if ((gpioIn & (1 << DR1)) == 0) { // If the drive is enabled, then we need to check for commands
 
             // If WRQ is low (Lisa is trying to write) or we have stashed sectors to write out, then call receiveSector to handle it
@@ -168,7 +175,11 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         break;
                     case 12:
                     case 13: // SIDES register (duplicated on both addresses 12 and 13); returns 0 for 400K drives, 1 for 800K drives
-                        writeRDA(metadata[1]->driveType == Drive800 ? 1 : 0);
+                        // Hard-code this to always return 1 even if it's a 400K disk
+                        // The Lisa seems to only re-check this value when the FDC first starts up, so making it dynamic can cause issues if we switch from a 400K to 800K disk without rebooting
+                        // Hard-coding to 1 simulates the behavior of having a real 800K drive plugged in all the time anyway
+                        //writeRDA(metadata[1]->driveType == Drive800 ? 1 : 0);
+                        writeRDA(1);
                         break;
                     case 14:
                     case 15: // /DRVIN register (duplicated on both addresses 14 and 15); hard-coded to 0 as a way for the host to detect a drive connected
@@ -220,12 +231,7 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void sonyLoop(volatile SdTaskInterf
                         break;
                     case 4: // /MOTORON register (low to turn motor on, high to turn motor off)
                         trackParams.motorOn = (regData == 0);
-                        // Turn on the activity LED whenever the motor is on too
-                        if (trackParams.motorOn) {
-                            REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED);
-                        }
-                        else {
-                            REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
+                        if (!trackParams.motorOn) {
                             // If the motor just turned off, this is a prime opportunity to write the current track to the image if necessary
                             // This works basically the same as in the step case above, except that we don't need to change the track number since we're not stepping
                             if (bufferStatus.bufferDirty == true && !trackParams.pendingDispatch) {

@@ -380,7 +380,6 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                     // Otherwise, if MT is high, the motor is off, and the timer has been running for at least 240000 cycles, then turn the motor on
                     motorStartTime[0] = 0;
                     trackParams[0].motorOn = true;
-                    REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED); // Now that the motor is on, turn on the LED
                 } else if (!currMT0 && trackParams[0].motorOn && motorStartTime[0] == 0) {
                     // If MT is low, the motor is on, and the timer hasn't started yet, then start the timer
                     motorStartTime[0] = esp_cpu_get_cycle_count();
@@ -388,11 +387,6 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                     // If MT is low, the motor is on, and the timer has been running for at least 240000 cycles, then turn the motor off
                     motorStartTime[0] = 0;
                     trackParams[0].motorOn = false;
-                    if (trackParams[1].motorOn == false) {
-                        // Now that the upper drive's motor is off, turn off the LED
-                        // But only if the lower drive's motor is also off
-                        REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
-                    }
                     // Now that the motor is off, we need to flush the track buffer to the SD card if it's dirty
                     // We already do this on every seek, but what if the Lisa wrote the current track without seeking away?
                     // Well, it won't get written until ejection, which should be fine, but what if the user just turns the emulator off without ejecting?
@@ -419,7 +413,6 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                     // Otherwise, if MT is high, the motor is off, and the timer has been running for at least 240000 cycles, then turn the motor on
                     motorStartTime[1] = 0;
                     trackParams[1].motorOn = true;
-                    REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED); // Now that the motor is on, turn on the LED
                 } else if (!currMT1 && trackParams[1].motorOn && motorStartTime[1] == 0) {
                     // If MT is low, the motor is on, and the timer hasn't started yet, then start the timer
                     motorStartTime[1] = esp_cpu_get_cycle_count();
@@ -427,11 +420,6 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                     // If MT is low, the motor is on, and the timer has been running for at least 240000 cycles, then turn the motor off
                     motorStartTime[1] = 0;
                     trackParams[1].motorOn = false;
-                    if (trackParams[0].motorOn == false) {
-                        // Now that the lower drive's motor is off, turn off the LED
-                        // But only if the upper drive's motor is also off
-                        REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
-                    }
                     // Do the exact same "flush on motor off" thing that we did for the upper drive; see the comments there for the explanation
                     if (bufferStatus.bufferDirty && bufferStatus.bufferOwnerDrive == 1 && !trackParams[1].pendingDispatch) {
                         // If the buffer is dirty, this drive owns it, and there's no pending dispatch, then set one up
@@ -506,6 +494,20 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR void twiggyLoop(volatile SdTaskInte
                     }
                     trackParams[1].ejectRequested = EjectNone; // Clear the ejectRequested flag so we don't keep ejecting
                 }
+
+                // Let's do one other thing here too: set the activity LED based on whether the drive motors are on
+                // If either motor is on, then blink the LED
+                if (trackParams[0].motorOn || trackParams[1].motorOn) {
+                    if ((esp_cpu_get_cycle_count() >> 25) & 1) {
+                        REG_WRITE(GPIO_OUT_W1TS_REG, 1 << LED);
+                    } else {
+                        REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
+                    }
+                } else {
+                    // If both motors are off, then turn the LED off
+                    REG_WRITE(GPIO_OUT_W1TC_REG, 1 << LED);
+                }
+
                 break;
             }
         }

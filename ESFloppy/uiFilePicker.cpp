@@ -382,25 +382,14 @@ void buildItemLabel(uint32_t index, char* buffer, uint32_t size) {
     }
 }
 
-// Call this whenever we want to re-enter the file picker at the root directory with everything reset to a fresh state
-// If we don't call this, then the picker will resume where it left off in the last directory that was open, with the last-selected item highlighted
-void filePickerReset() {
-    strcpy(currentDirectory, "/"); // Start in the root directory
-    currentItemIndex = 0; // Start with the first item selected
-    frameStartIndex = 0; // And visible
-    // Assemble the directory of images for the current directory
-    numMenuEntries = assembleDirectoryContents();
-}
-
 // This function gets called when we first enter the file picker screen
-// Note that it doesn't reset the current directory or selected item; just the scroll offset and SEL state
-// To reset those things, call filePickerReset first
 void filePickerEnter() {
     // Reset the scroll offset, scroll time, and SEL button state so that everything is completely fresh
     scrollOffset = 0;
     scrollTime = 0;
     selHeld = false;
     selActedUpon = false;
+    numMenuEntries = assembleDirectoryContents(); // And assemble the directory of images for the current directory
 }
 
 // This function gets called periodically while we're on the file picker screen

@@ -597,8 +597,6 @@ void statusButtonPress(bool buttonStates[3]) {
         }
         // If no disk is inserted, then pressing SEL will bring up the file picker so the user can select a disk to insert
         else if (buttonStates[1] && !diskMetadataPointers[1]->diskInserted) {
-            // Reset the file picker to the root directory before we push it
-            filePickerReset();
             pushScreen(&filePickerScreen);
         }
     } else {
@@ -624,8 +622,6 @@ void statusButtonPress(bool buttonStates[3]) {
                 selTargetDrive = selectedDrive;
             } else {
                 // If there's no disk inserted, then just bring up the file picker so the user can select a disk to insert
-                // Reset the file picker to the root directory before we push it
-                filePickerReset();
                 pushScreen(&filePickerScreen);
             }
         } else if (selPressed && getButtonHeld(1)) {

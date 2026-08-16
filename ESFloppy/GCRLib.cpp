@@ -395,12 +395,32 @@ void encodeTrackToGCR(uint8_t track, DecodedSector decodedSectors[2][22], GcrSec
             }
         }
     }
-    // Otherwise it's a single-sided disk, so just do side 0
+    // Otherwise it's a single-sided disk, so only put actual data on side 0
     // No need to do the Sony vs Twiggy check here since we already know it's single-sided and Twiggies are double-sided
     else {
         InterleaveTable interleaveTable = getInterleaveTable(metadata, decodedSectors[0][0].format, false);
         for (int i = 0; i < sectorCount[0]; i++) {
             encodeSector(&decodedSectors[0][interleaveTable[sectorCount[0]][i]], &gcrSectors[0][i], metadata);
+        }
+        // This doesn't mean that our work is over though; we need to fill side 1 with empty sectors
+        // The reason we need to do this is really stupid; the Lisa 800K disk ROM will try and format both sides of a disk regardless of whether it's 400K/800K
+        // So when it goes to do the verify pass, it expects to find fresh empty sectors on side 1, and will fail if not
+        // So on a 400K disk, we need to spoof fake empty sectors on side 1 so that the verify pass will succeed
+        // This is the only time where the floppy controller will actually use side 1 of a 400K disk (unless an OS totally killed itself or something), so no need to worry about any other cases
+        for (int i = 0; i < sectorCount[1]; i++) {
+            // Iterate through all of the sectors on side 1 and start by constructing their headers
+            // The headers are the same as the corresponding sectors on side 0, except the side bit is set to 1
+            // And of course this also means that we need to recompute the header checksum
+            gcrSectors[1][i].loTrack = gcrSectors[0][i].loTrack;
+            gcrSectors[1][i].sector = gcrSectors[0][i].sector;
+            gcrSectors[1][i].hiTrackSide = gcr_6to8[(gcr_8to6[gcrSectors[0][i].hiTrackSide] | 0x20)]; // Set the side bit to 1
+            gcrSectors[1][i].format = gcrSectors[0][i].format;
+            gcrSectors[1][i].headerChecksum = gcr_6to8[gcr_8to6[gcrSectors[1][i].loTrack] ^ gcr_8to6[gcrSectors[1][i].sector] ^ gcr_8to6[gcrSectors[1][i].hiTrackSide] ^ gcr_8to6[gcrSectors[1][i].format]]; // Recompute the header checksum with the side bit set to 1
+            gcrSectors[1][i].sector_again = gcrSectors[0][i].sector_again;
+            // Now fill the data and data checksum portion of the sector with whatever was on side 0
+            // In the format case, this will be all 0's, and that's the only case we care about
+            memcpy(gcrSectors[1][i].data, gcrSectors[0][i].data, sizeof(gcrSectors[0][i].data));
+            memcpy(gcrSectors[1][i].dataChecksum, gcrSectors[0][i].dataChecksum, sizeof(gcrSectors[0][i].dataChecksum));
         }
     }
 
