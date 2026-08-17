@@ -1,8 +1,9 @@
 # ESFloppy
 An ESP32-based floppy drive emulator for the Mac and Lisa. It can even emulate Twiggy drives!
 
-MEOWMEOW picture
+<img src="images/esfloppy_lisafpga_picture.png" width="800" />
 
+Sorry about the rolling shutter on the display in the picture; I spent about 30 minutes trying to get rid of it and this was the best I could do...
 
 # Quick Start
 - [I want to get an ESFloppy of my own.](#building-one)
