@@ -23,6 +23,12 @@ extern U8G2_SH1106_128X64_NONAME_F_HW_I2C OLED;
 #define SD_ERROR_ICON_HEIGHT 34
 #define ERROR_ICON_WIDTH 29
 #define ERROR_ICON_HEIGHT 29
+#define FW_ERROR_ICON_WIDTH 33
+#define FW_ERROR_ICON_HEIGHT 25
+#define FW_UPDATE_ICON_WIDTH 33
+#define FW_UPDATE_ICON_HEIGHT 25
+#define FW_SUCCESS_ICON_WIDTH 33
+#define FW_SUCCESS_ICON_HEIGHT 25
 // These are more icons, but they're a lot smaller because they have to fit within the menu rows
 #define FOLDER_ICON_WIDTH 8
 #define FOLDER_ICON_HEIGHT 6
@@ -64,6 +70,15 @@ void drawFolderIcon(uint32_t x, uint32_t y);
 // Here's the up arrow icon for the ".." menu entry, once again with the y coordinate being the top of the menu row
 void drawUpOneLevelIcon(uint32_t x, uint32_t y);
 
+// Draws an icon reprsenting a failed firmware update
+void drawFwUpdateErrorIcon(uint32_t x, uint32_t y);
+
+// Draws an icon representing a firmware update in progress
+void drawFwUpdateProgressIcon(uint32_t x, uint32_t y);
+
+// Draws an icon representing a successful firmware update
+void drawFwUpdateSuccessIcon(uint32_t x, uint32_t y);
+
 // This function is really simple; it just marks every single page as dirty to force the entire display to be resent
 void markAllPagesDirty();
 
@@ -88,3 +103,12 @@ uint32_t drawInvertedString(uint32_t x, uint32_t y, const char* text, bool fullW
 // Just like drawClippedText, this also supports a charOffset for horizontal scrolling of the text and returns the full string width
 // reservedWidth is how many pixels to keep clear at the right-hand end of the row for an icon; the inverse video box is still full width either way
 uint32_t drawMenuRow(uint32_t y, const char* text, uint32_t charOffset, bool selected, uint32_t reservedWidth = 0);
+
+// Displays a firmware update error message on the OLED, complete with a nice little icon and a "Press SEL to continue" message
+void drawFwUpdateError(const char* errorMesage);
+
+// Displays a firmware update progress message on the OLED, along with the old and new version numbers
+void drawFwUpdateProgress(uint32_t bytesDone, uint32_t bytesTotal, const char* newVersion);
+
+// Displays a firmware update success message on the OLED
+void drawFwUpdateSuccess(const char* newVersion);

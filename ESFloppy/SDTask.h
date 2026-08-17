@@ -13,5 +13,8 @@ __attribute__((optimize("Ofast"))) IRAM_ATTR bool tryToStartSD(volatile SdTaskIn
 // They're stored in a ring buffer and printed over serial whenever the SD core gets a chance
 void debugPrint(char* inString, uint32_t length);
 
+// This function checks to see if a firmware update file is present on the SD card and if so, upgrades/downgrades the firmware
+void attemptFirmwareUpdate();
+
 // This is the actual task itself that runs on the other core
 void sdCardTask(void* params);

@@ -213,12 +213,12 @@ void welcomeButtonPress(bool buttonStates[3]) {
 // This function gets called to draw the welcome screen on the OLED
 // The screen is in the following format:
 /*
-     Welcome to ESFloppy!
-Emulation Mode: Lisa 400K/800K
+   Welcome to ESFloppy!
+   Mode: Lisa 400K/800K
     |---------------|
     |     Icon      |
     |_______________|
-   SEL: Change settings...
+   SEL: Open settings...
 */
 void welcomeDrawScreen() {
     char buffer[40]; // Use this temp buffer to build some of the lines of text that we need to draw

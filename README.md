@@ -73,11 +73,17 @@ At the moment, you can't build a standalone ESFloppy. The only way you can get o
 # Installing/Upgrading the Firmware
 There are three different ways to do this, and which one you choose comes down to whether you have a LisaFPGA or standalone ESFloppy and whether your ESFloppy has ever been programmed before.
 
-## Option 1 - The easy LisaFPGA method; works on programmed and unprogrammed ESFloppies.
-This one is simple; just clone the LisaFPGA repo and run the (program_board.sh)[https://github.com/alexthecat123/LisaFPGA#programmingupdating-the-firmware] script. This will automatically grab the latest ESFloppy firmware, build it, and install it onto your board, and also upgrade the ESProFile firmware and FPGA bitstream at the same time if applicable. Literally just one command, and it works regardless of whether your ESFloppy has already been programmed in the past or is fresh from the factory. But it DOES have to be on a LisaFPGA board; this obviously won't work with the standalone unit.
+## Option 1 - The easy method that works with both LisaFPGA and standalone ESFloppies, but they must have already been programmed in the past.
+Download the [build/esfloppy_fw.bin](build/esfloppy_fw.bin) firmware file from this repo and copy it to the root of your microSD card. Insert the card into your ESFloppy and turn it on. You'll see a progress bar as the firmware upgrade commences. Once it's done, ESFloppy will tell you that the update succeeded and prompt you to press SEL to reboot. At this point you can delete the file from the card if you want, but you don't have to. As I said, this works on both the LisaFPGA and standalone versions of ESFloppy, but it must have already been programmed with another version of the firmware in the past, or else it's incapable of scanning the SD card to upgrade to the new one.
 
-## Option 2 - The easy method that works with both LisaFPGA and standalone ESFloppies, but they must have already been programmed with an older firmware.
-Download the [esfloppy_latest.bin](esfloppy_latest.bin) firmware file from this repo and copy it to the root of your microSD card. Insert the card into your ESFloppy and turn it on. You'll see a progress bar as the firmware upgrade commences. Once it's done, ESFloppy will reboot and tell you that the update succeeded. At this point you can delete the file from the card if you want, but you don't have to. As I said, this works on both the LisaFPGA and standalone versions of ESFloppy, but it must have already been programmed with an older version of the firmware in the past, or else it's incapable of scanning the SD card to upgrade to the new one.
+If the firmware version on the SD card is the same as the one that's already installed, then the upgrade will be skipped entirely, which is why you don't need to delete the file from the card after the upgrade completes. But if you want to force the "upgrade" to happen anyway, you can hold down the LEFT and RIGHT buttons simultaneously while resetting ESProFile. This causes the version number check to get skipped and you can "upgrade" to the same version that's already installed.
+
+The firmware update mechanism that I'm using is incredibly robust and it should be virtually impossible to corrupt the firmware in the event of a botched update (you can even pull the SD card out mid-update and it'll just revert to the old firmware version), but if the update somehow does corrupt your firmware, you'll need to try Option 3 (or Option 2 if you have a LisaFPGA) to bring things back to life. 
+
+MEOWMEOW pictures of programming and success screens
+
+## Option 2 - The easy LisaFPGA method; works on programmed and unprogrammed ESFloppies.
+This one is simple; just clone the LisaFPGA repo and run the (program_board.sh)[https://github.com/alexthecat123/LisaFPGA#programmingupdating-the-firmware] script. This will automatically grab the latest ESFloppy firmware, build it, and install it onto your board, and also upgrade the ESProFile firmware and FPGA bitstream at the same time if applicable. Literally just one command, and it works regardless of whether your ESFloppy has already been programmed in the past or is fresh from the factory. But it DOES have to be on a LisaFPGA board; this obviously won't work with the standalone unit.
 
 ## Option 3 - The hard(er) method that works with anything.
 If neither of the above methods fit your situation, or you want to compile from source, then this is the method you'll want to choose. Start by downloading the Arduino IDE from [here](https://www.arduino.cc/en/software/) and install it onto your computer if you don't already have it.
@@ -86,20 +92,25 @@ Once you have it installed, download this repo and open the file [ESFloppy/ESFlo
 
 MEOWMEOW picture
 
-Now we need to install the ESP32 board package to add support for the ESP32-S3 and also a few libraries that we need to get the SD card and OLED running. Let's start with the board package.
+Now we need to install the ESP32 board package to add support for the ESP32-S3 and also a few libraries that we need to get the SD card and OLED running. Let's start with the board package. Click the icon on the left vertical bar that looks like a circuit board (the one right below the folder icon) and then type "esp32" in the Filter your search... box. Find the board package called "esp32 by Espressif Systems" (the second one in my photo) and hit Install. Do NOT choose the Arduino ESP32 Boards option; that's not the one we want.
 
-SDfdsijdklgjdlfgjldkfg
+MEOWMEOW picture
 
-Once all that's done, plug your ESFloppy (or LisaFPGA board) into your computer over USB and go to Tools->Board and select ESP32-S3 Dev Module as your board. Then go to Tools->Port and select whichever USB port your ESFloppy is connected to as your port. If you're not sure which port to pick, press and hold the RESET button on your ESFloppy. Whichever port disappears from the list is the one you want to choose.
+And now onto the libraries. There are two that we need: SdFat and u8g2. Click the bookshelf icon that's right below the circuit board on the left vertical bar and search for "sdfat". Install the "SdFat by Bill Greiman" library. Then search for "u8g2" and install the one that says "U8g2 by oliver". And that's it; all of our dependencies are now satisfied!
+
+MEOWMEOW picture
+MEOWMEOW picture
+
+Once all that's done, plug your ESFloppy (or LisaFPGA board) into your computer over USB and go to Tools->Board and select ESP32-S3 Dev Module as your board. Then go to Tools->Port and select whichever USB port your ESFloppy is connected to as your port. If you're not sure which port to pick, press and hold the RESET button on your ESFloppy. Whichever port disappears from the list is the one you want to choose. And last but not least, go to Tools->USB CDC On Boot and make sure it's Enabled.
 
 They should already match, but take a look at all of the other settings in your Tools menu and make sure they match what you see in my screenshot here:
 
 MEOWMEOW picture
 
-Once all that's done, hit the right-arrow icon in the top-right of the screen to compile and upload the code to your board. Wait for that to finish, and then rejoice in the knowledge that you should never have to do this again since you've now unlocked the ability to update using [Option 2](#option-2---the-easy-method-that-works-with-both-lisafpga-and-standalone-esfloppies-but-they-must-have-already-been-programmed-with-an-older-firmware). How nice.
+Once all that's done, hit the right-arrow icon in the top-right of the screen to compile and upload the code to your board. Wait for that to finish, and then rejoice in the knowledge that you should never have to do this again since you've now unlocked the ability to update using [Option 1](#option-1---the-easy-method-that-works-with-both-lisafpga-and-standalone-esfloppies-but-they-must-have-already-been-programmed-in-the-past). How nice.
 
-
-
+### Making a Firmware Update File
+If you're modifying the code and building from source, you can easily create an esfloppy_fw.bin file to copy to an SD card to make use of the SD card firmware update feature. To create this file, make sure you've installed the ESP32 board package and libraries as described above, and then run ```./esp32Package.sh``` from the root of this repo. This will generate your firmware update file in [build/esfloppy_fw.bin](build/esfloppy_fw.bin).
 
 
 # Using It
@@ -155,6 +166,9 @@ Commits any changes to these settings to non-volatile storage and reboots ESFlop
 
 #### Discard and Reboot
 Reboots ESFloppy, discarding any changes you may have made to the settings.
+
+#### About
+Displays some info about ESFloppy and its current firmware version. Press SEL to return to the main settings menu.
 
 ### The Status Screen
 If you let the startup screen go by without pressing SEL to enter the settings screen, you'll be sent to the status screen, which is the main display that you'll see while using ESFloppy.

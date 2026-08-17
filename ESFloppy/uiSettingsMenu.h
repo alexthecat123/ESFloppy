@@ -1,8 +1,5 @@
 // Header file for the ESFloppy UI's settings menu
 
-// Pops a menu off the stack and makes it the current menu
-static void popMenu();
-
 // This is the function that gets called when we first enter the settings screen
 void settingsEnter();
 

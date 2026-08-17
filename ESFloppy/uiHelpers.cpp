@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "fwVersion.h"
 #include "types.h"
 #include "uiHelpers.h"
 #include "uiState.h"
@@ -306,6 +307,93 @@ static const uint8_t upOneLevelIconBits[] = {
     0x00,
 };
 
+// The "firmware update failed" icon
+static const uint8_t fwErrorIconBits[] = {
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0x30, 0x00, 0x00, 0x18, 0x00,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x30, 0x0E, 0xE0, 0x18, 0x00,
+    0x30, 0x1E, 0xF0, 0x18, 0x00,
+    0x30, 0x3E, 0xF8, 0x18, 0x00,
+    0x30, 0x7C, 0x7C, 0x18, 0x00,
+    0x3F, 0xF8, 0x3E, 0xF8, 0x01,
+    0x3F, 0xF0, 0x1F, 0xF8, 0x01,
+    0x30, 0xE0, 0x0F, 0x18, 0x00,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x30, 0xE0, 0x0F, 0x18, 0x00,
+    0x30, 0xF0, 0x1F, 0x18, 0x00,
+    0x3F, 0xF8, 0x3E, 0xF8, 0x01,
+    0x3F, 0x7C, 0x7C, 0xF8, 0x01,
+    0x30, 0x3E, 0xF8, 0x18, 0x00,
+    0x30, 0x1E, 0xF0, 0x18, 0x00,
+    0x30, 0x0E, 0xE0, 0x18, 0x00,
+    0x30, 0x00, 0x00, 0x18, 0x00,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+};
+
+// The "firmware update in progress" icon
+static const uint8_t fwUpdateIconBits[] = {
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0x30, 0x00, 0x00, 0x18, 0x00,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x3F, 0xC0, 0x07, 0xF8, 0x01,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x3F, 0xC0, 0x07, 0xF8, 0x01,
+    0x3F, 0xC0, 0x07, 0xF8, 0x01,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x30, 0xFC, 0x7F, 0x18, 0x00,
+    0x30, 0xF8, 0x3F, 0x18, 0x00,
+    0x3F, 0xF0, 0x1F, 0xF8, 0x01,
+    0x3F, 0xE0, 0x0F, 0xF8, 0x01,
+    0x30, 0xC0, 0x07, 0x18, 0x00,
+    0x30, 0x80, 0x03, 0x18, 0x00,
+    0x30, 0x00, 0x01, 0x18, 0x00,
+    0x30, 0x00, 0x00, 0x18, 0x00,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+};
+
+// The "firmware update complete" icon
+static const uint8_t fwSuccessIconBits[] = {
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0x30, 0x00, 0x00, 0x18, 0x00,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x30, 0x00, 0xC0, 0x18, 0x00,
+    0x30, 0x00, 0xE0, 0x19, 0x00,
+    0x30, 0x00, 0xF0, 0x19, 0x00,
+    0x30, 0x00, 0xF8, 0x18, 0x00,
+    0x3F, 0x00, 0x78, 0xF8, 0x01,
+    0x3F, 0x00, 0x3C, 0xF8, 0x01,
+    0x30, 0x0E, 0x3E, 0x18, 0x00,
+    0x30, 0x1F, 0x1F, 0x18, 0x00,
+    0x30, 0xBE, 0x0F, 0x18, 0x00,
+    0x30, 0xFE, 0x07, 0x18, 0x00,
+    0x3F, 0xFC, 0x03, 0xF8, 0x01,
+    0x3F, 0xF8, 0x01, 0xF8, 0x01,
+    0x30, 0xF0, 0x00, 0x18, 0x00,
+    0x30, 0x40, 0x00, 0x18, 0x00,
+    0x30, 0x00, 0x00, 0x18, 0x00,
+    0x30, 0x00, 0x00, 0x18, 0x00,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0x3F, 0x00, 0x00, 0xF8, 0x01,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+    0xF0, 0xFF, 0xFF, 0x1F, 0x00,
+};
+
 // Whether each button is currently being held down, after accounting for debounce; used in getButtonStates and getButtonHeld
 static bool buttonHeld[3] = {false, false, false};
 
@@ -435,6 +523,21 @@ void drawUpOneLevelIcon(uint32_t x, uint32_t y) {
     OLED.drawXBM(x + (FOLDER_ICON_WIDTH - UP_ONE_LEVEL_ICON_WIDTH), y + 1 + ((7 - UP_ONE_LEVEL_ICON_HEIGHT) / 2), UP_ONE_LEVEL_ICON_WIDTH, UP_ONE_LEVEL_ICON_HEIGHT, upOneLevelIconBits);
 }
 
+// Draws an icon reprsenting a failed firmware update
+void drawFwUpdateErrorIcon(uint32_t x, uint32_t y) {
+    OLED.drawXBM(x, y, FW_ERROR_ICON_WIDTH, FW_ERROR_ICON_HEIGHT, fwErrorIconBits);
+}
+
+// Draws an icon representing a firmware update in progress
+void drawFwUpdateProgressIcon(uint32_t x, uint32_t y) {
+    OLED.drawXBM(x, y, FW_UPDATE_ICON_WIDTH, FW_UPDATE_ICON_HEIGHT, fwUpdateIconBits);
+}
+
+// Draws an icon representing a successful firmware update
+void drawFwUpdateSuccessIcon(uint32_t x, uint32_t y) {
+    OLED.drawXBM(x, y, FW_SUCCESS_ICON_WIDTH, FW_SUCCESS_ICON_HEIGHT, fwSuccessIconBits);
+}
+
 // This is a bitmask representing which pages of the OLED are dirty and need to be resent to the display
 // We need this because it's too slow to send the whole display out over I2C in one go, so we just send a single page at a time
 // Each page is 8 pixels tall, so there are 8 pages in total on our 64-pixel display
@@ -544,5 +647,65 @@ uint32_t drawMenuRow(uint32_t y, const char* text, uint32_t charOffset, bool sel
         // If the item isn't selected, then just draw it normally
         // And return the string width too
         return drawClippedText(0, y, textWidth, text, charOffset);
+    }
+}
+
+// Displays a firmware update error message on the OLED, complete with a nice little icon and a "Press SEL to continue" message
+void drawFwUpdateError(const char* errorMesage) {
+    OLED.clearBuffer();
+    // First, display a generic failure message and then the specific error
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("FW update failed!")) / 2), 0, "FW update failed!");
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth(errorMesage)) / 2), (MENU_ITEM_HEIGHT + 2) * 1, errorMesage);
+    // Followed by the error icon centered horizontally and vertically in the space between the error message and the "Press SEL..." prompt
+    drawFwUpdateErrorIcon((OLED.getDisplayWidth() - FW_ERROR_ICON_WIDTH) / 2, (MENU_ITEM_HEIGHT + 2) * 2 + ((((MENU_ITEM_HEIGHT * 7) - ((MENU_ITEM_HEIGHT + 2) * 2)) - FW_ERROR_ICON_HEIGHT) / 2));
+    // And finally, the "Press SEL..." prompt
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Press SEL...")) / 2), MENU_ITEM_HEIGHT * 7, "Press SEL...");
+    OLED.sendBuffer();
+    while (digitalRead(SEL) == LOW) {
+        vTaskDelay(1); // Wait for the user to release SEL if it's being held
+    }
+    while (digitalRead(SEL) == HIGH) {
+        vTaskDelay(1); // And then wait for them to press it again before continuing
+    }
+}
+
+// Displays a firmware update progress message on the OLED, along with the old and new version strings
+void drawFwUpdateProgress(uint32_t bytesDone, uint32_t bytesTotal, const char* newVersion) {
+    OLED.clearBuffer();
+    // First display an "Updating firmware..." message
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Updating firmware...")) / 2), 0, "Updating firmware...");
+    // Then display the old and new version strings in the format "oldVersion -> newVersion"
+    char versionUpdateString[32];
+    snprintf(versionUpdateString, sizeof(versionUpdateString), "%s -> %s", FIRMWARE_VERSION, newVersion);
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth(versionUpdateString)) / 2), (MENU_ITEM_HEIGHT + 2) * 1, versionUpdateString);
+    // Then display a progress bar showing how far along the update is
+    uint32_t progressBarWidth = (bytesDone * OLED.getDisplayWidth()) / bytesTotal;
+    OLED.drawBox(0, (MENU_ITEM_HEIGHT + 2) * 2, progressBarWidth, MENU_ITEM_HEIGHT);
+    // Draw a "firmware update in progress" icon, centered horizontally and vertically in the space between the progress bar and the "don't power off" warning
+    drawFwUpdateProgressIcon((OLED.getDisplayWidth() - FW_UPDATE_ICON_WIDTH) / 2, (MENU_ITEM_HEIGHT + 2) * 3 + ((((MENU_ITEM_HEIGHT * 7) - ((MENU_ITEM_HEIGHT + 2) * 3)) - FW_ERROR_ICON_HEIGHT) / 2));
+    // And finally, display a "don't power off" warning at the bottom of the screen
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Don't turn off!")) / 2), MENU_ITEM_HEIGHT * 7, "Don't turn off!");
+    OLED.sendBuffer();
+}
+
+// Displays a firmware update success message on the OLED
+void drawFwUpdateSuccess(const char* newVersion) {
+    OLED.clearBuffer();
+    // First display a "Firmware update complete!" message
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("FW update complete!")) / 2), 0, "FW update complete!");
+    // Then display the old and new version strings in the same oldVersion -> newVersion format as before
+    char versionUpdateString[32];
+    snprintf(versionUpdateString, sizeof(versionUpdateString), "%s -> %s", FIRMWARE_VERSION, newVersion);
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth(versionUpdateString)) / 2), (MENU_ITEM_HEIGHT + 2) * 1, versionUpdateString);
+    // Then display a "success" icon, centered horizontally and vertically in the space between the version string and the SEL prompt
+    drawFwUpdateSuccessIcon((OLED.getDisplayWidth() - FW_SUCCESS_ICON_WIDTH) / 2, (MENU_ITEM_HEIGHT + 2) * 2 + ((((MENU_ITEM_HEIGHT * 7) - ((MENU_ITEM_HEIGHT + 2) * 2)) - FW_ERROR_ICON_HEIGHT) / 2));
+    // And finally, display a "Press SEL to continue" prompt at the bottom of the screen
+    OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Press SEL to reboot.")) / 2), MENU_ITEM_HEIGHT * 7, "Press SEL to reboot.");
+    OLED.sendBuffer();
+    while (digitalRead(SEL) == LOW) {
+        vTaskDelay(1); // Wait for the user to release SEL if it's being held
+    }
+    while (digitalRead(SEL) == HIGH) {
+        vTaskDelay(1); // And then wait for them to press it again before continuing
     }
 }

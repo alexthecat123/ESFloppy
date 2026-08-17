@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "config.h"
+#include "fwVersion.h"
 #include "types.h"
 #include "ui.h"
 #include "uiHelpers.h"
@@ -18,6 +19,7 @@ Contrast: 255
 Screen Dim: On
 Save and Reboot
 Discard and Reboot
+About...
 */
 // The "Emulation Mode..." item opens a Menu_Enum submenu that looks like this:
 /*
@@ -31,6 +33,8 @@ Twiggy
 // And screen dim is a Menu_Toggle that just lets you turn the dimming feature on or off
 
 static void popMenu(); // Forward declaration of the popMenu function so that we can use it in the menu items below
+
+static void drawAboutScreen(); // Forward declaration of drawAboutScreen for the menu items below
 
 // Start by making all of the MenuItems for the emulation mode submenu
 static const MenuItem emulationModeItems[] = {
@@ -60,15 +64,17 @@ static const MenuItem mainMenuItems[] = {
     {"Screen Dim", Menu_Toggle, &configSettings.dimDisplay, 0, 0, 0, 0, nullptr, nullptr, nullptr},
     // The Menu_Action for saving and rebooting; all we need is the function, which literally just saves the settings and then reboots
     {"Save and Reboot", Menu_Action, nullptr, 0, 0, 0, 0, nullptr, nullptr, []() { initConfig(); writeConfig(configSettings); closeConfig(); ESP.restart(); }},
-    // And finally a Menu_Action for exiting without saving; it just reboots without doing anything else
-    {"Discard and Reboot", Menu_Action, nullptr, 0, 0, 0, 0, nullptr, nullptr, []() { ESP.restart(); }}
+    // A Menu_Action for exiting without saving; it just reboots without doing anything else
+    {"Discard and Reboot", Menu_Action, nullptr, 0, 0, 0, 0, nullptr, nullptr, []() { ESP.restart(); }},
+    // And finally an About... item that shows the firmware version
+    {"About...", Menu_Action, nullptr, 0, 0, 0, 0, nullptr, nullptr, []() { drawAboutScreen(); }}
 };
 
 // And finally, the main menu itself
 static const Menu mainMenu = {
     "ESFloppy Settings",
     mainMenuItems,
-    5
+    6
 };
 
 static const Menu* currentMenu; // The currently-selected menu
@@ -92,6 +98,28 @@ static void popMenu() {
         currentMenu = menuStack[menuStackPointer];
         currentItemIndex = itemIndexStack[menuStackPointer];
         frameStartIndex = frameStartIndexStack[menuStackPointer];
+    }
+}
+
+// Draws the About screen, which shows some general information about ESFloppy like the firmware version
+static void drawAboutScreen() {
+    // For now, the only thing I can think of to put here is the firmware version
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "FW Version: %s", FIRMWARE_VERSION);
+    OLED.clearBuffer();
+    // Draw a title and horizontal separator underneath it
+    OLED.drawStr(((128 - OLED.getStrWidth("About ESFloppy")) / 2), 0, "About ESFloppy");
+    OLED.drawHLine(0, MENU_ITEM_HEIGHT, OLED.getDisplayWidth());
+    // Then draw the version string below that
+    OLED.drawStr(((128 - OLED.getStrWidth(buffer)) / 2), MENU_ITEM_HEIGHT * 2, buffer);
+    // And finally, draw a "press SEL to continue" prompt at the bottom of the screen
+    OLED.drawStr(((128 - OLED.getStrWidth("Press SEL...")) / 2), MENU_ITEM_HEIGHT * 7, "Press SEL...");
+    OLED.sendBuffer();
+    while (digitalRead(SEL) == LOW) {
+        vTaskDelay(1); // Wait for the user to release SEL if it's being held
+    }
+    while (digitalRead(SEL) == HIGH) {
+        vTaskDelay(1); // And then wait for them to press it again before continuing
     }
 }
 

@@ -1,8 +1,11 @@
 #include <Arduino.h>
+#include "esp_ota_ops.h"
+#include "esp_rom_crc.h"
 #include <U8g2lib.h>
 #include <SdFat.h>
 #include <Wire.h>
 #include "diskLib.h"
+#include "fwVersion.h"
 #include "GCRLib.h"
 #include "profont6.h"
 #include "SDTask.h"
@@ -93,6 +96,131 @@ void debugPrint(char* inString, uint32_t length) {
     debugHead = nextSlot;
 }
 
+// This function checks to see if a firmware update file is present on the SD card and if so, upgrades/downgrades the firmware
+void attemptFirmwareUpdate() {
+    // First up, try to open the firmware update file on the SD card
+    File32 updateFile;
+    if (!updateFile.open("/esfloppy_fw.bin", O_RDONLY)) {
+        // If we can't open the file, then it probably doesn't exist and there's no update to do, so just return
+        return;
+    }
+
+    // If we succeeded in opening it, then we need to take a look at its header to make sure that it's valid
+    FirmwareUpdateHeader header;
+    if (updateFile.read(&header, sizeof(FirmwareUpdateHeader)) != sizeof(FirmwareUpdateHeader)) {
+        // If we couldn't read the header, then the file is probably corrupted, so just close it and return without doing anything
+        updateFile.close();
+        return;
+    }
+
+    header.versionString[7] = '\0'; // Make sure the version string is null-terminated
+
+    // But if we did read the header, then we need to make sure that it's an actual header and not just garbage data
+    if (strncmp(header.magicString, "ESFloppy", 8) != 0) {
+        // Start by making sure that the magic string is in fact "ESFloppy" and return if not
+        updateFile.close();
+        return;
+    }
+
+    // Now we know it's a real firmware file; check its version string to see if it's the same as the current firmware version
+    // If so, then there's no need to update, so just return
+    // Add an extra check too so that the user can override the version requirement if they hold LEFT and RIGHT at the same time
+    // If they do, this, we ignore the version check and allow them to "upgrade" to the same version if they want to
+    if ((strncmp(header.versionString, FIRMWARE_VERSION, 8) == 0) && !((digitalRead(LEFT) == LOW) && (digitalRead(RIGHT) == LOW))) {
+        // If so, then there's no need to update, so return once again
+        updateFile.close();
+        return;
+    }
+
+    // If we get here, then we actually have an update to do, so see if we have a place to store it
+    // In its default partition scheme, the ESP32 should have two OTA partitions that we can use to store firmware
+    // We're using one of them for the current firmware, so find the other one and use it for the new one
+    const esp_partition_t* updatePartition = esp_ota_get_next_update_partition(NULL);
+    if ((updatePartition == NULL) || (header.firmwareSize > updatePartition->size)) {
+        // If we couldn't find a partition to write to (the ESP is programmed with the wrong scheme) or the firmware is too big for the partition, then print an error
+        updateFile.close();
+        drawFwUpdateError("No space for new FW!");
+        return;
+    }
+
+    // If we made it here, then we should be in good shape to actually start the update
+    esp_ota_handle_t updateHandle;
+    if (esp_ota_begin(updatePartition, header.firmwareSize, &updateHandle) != ESP_OK) {
+        // If we failed to start the update, then print another error and return
+        updateFile.close();
+        drawFwUpdateError("Can't start update!");
+        return;
+    }
+
+    // Now that we've started the update, we need to read the firmware data from the file and write it to the updatePartition
+    static uint8_t fwBuffer[4096]; // A buffer to hold the firmware data as we read it from the file
+    uint32_t runningCRC = 0; // A running CRC that we compute as we write the firmware data to the partition
+    uint32_t bytesWritten = 0; // How many bytes we've written so far
+    while (bytesWritten < header.firmwareSize) {
+        // Keep going until we've written the entire firmware file to the partition
+        // Read data in chunks of 4KB (or less if we're at the end of the file and there's less than that left)
+        uint32_t bytesToRead = min((uint32_t)sizeof(fwBuffer), header.firmwareSize - bytesWritten);
+        uint32_t bytesRead = updateFile.read(fwBuffer, bytesToRead);
+        if (bytesRead != bytesToRead) {
+            // If we didn't read the expected number of bytes, then something is wrong with the file, so abort, print an error, and return
+            esp_ota_abort(updateHandle);
+            updateFile.close();
+            drawFwUpdateError("Can't read FW file!");
+            return;
+        }
+        
+        // Now try and write the data to the update partition
+        if (esp_ota_write(updateHandle, fwBuffer, bytesRead) != ESP_OK) {
+            // If we failed to write the data, then abort, print an error, and return just like before
+            esp_ota_abort(updateHandle);
+            updateFile.close();
+            drawFwUpdateError("Failed to write FW!");
+            return;
+        }
+
+        // Now update our running CRC with the data we just wrote
+        runningCRC = esp_rom_crc32_le(runningCRC, fwBuffer, bytesRead);
+        // Update the bytesWritten counter
+        bytesWritten += bytesRead;
+        // And update the progress bar on the OLED
+        drawFwUpdateProgress(bytesWritten, header.firmwareSize, header.versionString);
+    }
+
+    // Once we're out of that loop, the firmware should be fully written, and we just need to finalize the update
+    // Start by checking the CRC of the firmware we just wrote to make sure that it matches the expected CRC in the header
+    if (runningCRC != header.firmwareCRC) {
+        // If not, then abort with an error
+        esp_ota_abort(updateHandle);
+        updateFile.close();
+        drawFwUpdateError("FW CRC mismatch!");
+        return;
+    }
+
+    // If the CRC matches, then finalize the update
+    if (esp_ota_end(updateHandle) != ESP_OK) {
+        // If we failed to finalize the update, then abort with an error
+        updateFile.close();
+        drawFwUpdateError("Bad FW image!");
+        return;
+    }
+
+    // And the very last thing: if all of that succeeded, then we need to switch the boot partition to the new firmware's partition
+    // The beauty of this method is that if anything fails up to this point, the ESP will just keep booting from the old partition and nothing breaks
+    // We only switch to the new partition here at the very end
+    if (esp_ota_set_boot_partition(updatePartition) != ESP_OK) {
+        // Abort with yet another error if this failed too
+        updateFile.close();
+        drawFwUpdateError("Boot switch failed!");
+        return;
+    }
+
+    // If all of that succeeded, then we actually succeeded with the firmware update, so close the file and display a success message
+    updateFile.close();
+    drawFwUpdateSuccess(header.versionString);
+    // The success message blocks until the user presses SEL, so when we get here, they'll have acknowledged the update and we can reboot into the new firmware
+    ESP.restart();
+}
+
 // This is the actual task itself that runs on the other core
 void sdCardTask(void* params) {
     SdTaskParams* sdTaskParams = (SdTaskParams*)params; // First, cast the params pointer from void to the correct type (SdTaskParams)
@@ -141,6 +269,9 @@ void sdCardTask(void* params) {
             vTaskDelay(1);
         }
     }
+    // Now that we know we can talk to the SD card, check for a firmware update file and if it's present, update the firmware
+    attemptFirmwareUpdate();
+    // If we end up here, then there was no firmware update to do (the ESP will reboot if there was one)
     sdTaskParams->diskMetadata[0]->driveIndex = 0; // Set the drive index for the upper drive
     sdTaskParams->diskMetadata[1]->driveIndex = 1; // And also for the lower/Sony drive
     Serial.println("ESFloppy is ready!"); // And if all this succeeds, print a ready message
