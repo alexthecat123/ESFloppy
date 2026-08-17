@@ -80,7 +80,8 @@ If the firmware version on the SD card is the same as the one that's already ins
 
 The firmware update mechanism that I'm using is incredibly robust and it should be virtually impossible to corrupt the firmware in the event of a botched update (you can even pull the SD card out mid-update and it'll just revert to the old firmware version), but if the update somehow does corrupt your firmware, you'll need to try Option 3 (or Option 2 if you have a LisaFPGA) to bring things back to life. 
 
-MEOWMEOW pictures of programming and success screens
+![ESFloppy programming in progress screen.](images/17_fw_progress.png)
+![ESFloppy programming complete screen.](images/18_fw_success.png)
 
 ## Option 2 - The easy LisaFPGA method; works on programmed and unprogrammed ESFloppies.
 This one is simple; just clone the LisaFPGA repo and run the (program_board.sh)[https://github.com/alexthecat123/LisaFPGA#programmingupdating-the-firmware] script. This will automatically grab the latest ESFloppy firmware, build it, and install it onto your board, and also upgrade the ESProFile firmware and FPGA bitstream at the same time if applicable. Literally just one command, and it works regardless of whether your ESFloppy has already been programmed in the past or is fresh from the factory. But it DOES have to be on a LisaFPGA board; this obviously won't work with the standalone unit.
@@ -90,22 +91,22 @@ If neither of the above methods fit your situation, or you want to compile from 
 
 Once you have it installed, download this repo and open the file [ESFloppy/ESFloppy.ino](ESFloppy/ESFloppy.ino) in the IDE. This will not only open that file, but will also automatically open all of the other source files at the same time. The IDE should now look about like this:
 
-MEOWMEOW picture
+![Arduino IDE with project open.](images/arduino_ide_open.png)
 
 Now we need to install the ESP32 board package to add support for the ESP32-S3 and also a few libraries that we need to get the SD card and OLED running. Let's start with the board package. Click the icon on the left vertical bar that looks like a circuit board (the one right below the folder icon) and then type "esp32" in the Filter your search... box. Find the board package called "esp32 by Espressif Systems" (the second one in my photo) and hit Install. Do NOT choose the Arduino ESP32 Boards option; that's not the one we want.
 
-MEOWMEOW picture
+![ESP32 board package install.](images/esp32_board_package_install.png)
 
 And now onto the libraries. There are two that we need: SdFat and u8g2. Click the bookshelf icon that's right below the circuit board on the left vertical bar and search for "sdfat". Install the "SdFat by Bill Greiman" library. Then search for "u8g2" and install the one that says "U8g2 by oliver". And that's it; all of our dependencies are now satisfied!
 
-MEOWMEOW picture
-MEOWMEOW picture
+![SDFat library install.](images/sdfat_install.png)
+![U8g2 library install.](images/u8g2_install.png)
 
 Once all that's done, plug your ESFloppy (or LisaFPGA board) into your computer over USB and go to Tools->Board and select ESP32-S3 Dev Module as your board. Then go to Tools->Port and select whichever USB port your ESFloppy is connected to as your port. If you're not sure which port to pick, press and hold the RESET button on your ESFloppy. Whichever port disappears from the list is the one you want to choose. And last but not least, go to Tools->USB CDC On Boot and make sure it's Enabled.
 
 They should already match, but take a look at all of the other settings in your Tools menu and make sure they match what you see in my screenshot here:
 
-MEOWMEOW picture
+![Proper tools menu configuration.](images/tools_menu_config.png)
 
 Once all that's done, hit the right-arrow icon in the top-right of the screen to compile and upload the code to your board. Wait for that to finish, and then rejoice in the knowledge that you should never have to do this again since you've now unlocked the ability to update using [Option 1](#option-1---the-easy-method-that-works-with-both-lisafpga-and-standalone-esfloppies-but-they-must-have-already-been-programmed-in-the-past). How nice.
 
@@ -129,27 +130,28 @@ Anyway...
 If you've ever used a Floppy Emu before, then you should be right at home here. My lack of creative talent means that I copied the interface paradigm of the Floppy Emu pretty closely. I certainly added my own touch to it and tailored things more to my liking, but it's quite similar overall.
 
 ### The Startup Screen
-When ESFloppy first turns on, or you press the RESET button, you'll see one of two things. If you don't have an SD card inserted, your card is defective/flaky, or it's not FAT32-formatted, you'll see an "SD card error" screen like this one.
+When ESFloppy first turns on, or you press the RESET button, you'll see one of two things. If you don't have an SD card inserted, your card is defective/flaky, or it's not FAT32-formatted, you'll see an "SD card error" screen like one of these.
 
-MEOWMEOW picture
+!["SD card not installed" error screen.](images/01_sd_init_failed.png)
+!["Failed to open SD FS" error screen.](images/02_sd_root_failed.png)
 
 But if your card is inserted and working properly, then you'll see a variant of this screen instead:
 
-MEOWMEOW picture
+![ESFloppy startup screen.](images/05_welcome_twiggy.png)
 
 Notice that this screen displays the emulator's current emulation mode in text as well as in a graphic: Lisa 400K/800K, Mac 400K/800K, or Twiggy. If you wait for a few seconds, this screen will disappear and you'll be led to the emulator status screen, but notice that you also have the option to press SEL to enter another menu. If you do that, you'll end up on...
 
 ### The Settings Screen
 The Settings screen does exactly what it says: it allows you to configure some settings related to the functionality of your ESFloppy. These settings are stored in non-volatile memory, so they persist across power cycles and resets. The Settings screen looks like this:
 
-MEOWMEOW picture
+![ESFloppy settings screen.](images/06_settings.png)
 
 You can navigate through the menu options with the LEFT/RIGHT buttons, using the SEL button to pick one. The options available in this menu are:
 
 #### Emulation Mode...
 This one opens a whole submenu and lets you pick the which of the three emulation modes ESFloppy will be in: Lisa 400K/800K, Mac 400K/800K, or Twiggy. It looks like this:
 
-MEOWMEOW picture
+![ESFloppy emulation mode submenu.](images/07_emulation_mode.png)
 
 The modes should be pretty self-explanatory; pick Mac 400K/800K if you want to emulate a 3.5" Sony drive on a Mac, pick Lisa 400K/800K to emulate a 3.5" drive on a Lisa, and pick Twiggy to emulate a pair of Twiggy drives on the Lisa (and it probably works on the Twiggy Mac and Apple /// Twiggy controller prototypes too, although I obviously can't test on those).
 
@@ -175,11 +177,11 @@ If you let the startup screen go by without pressing SEL to enter the settings s
 
 It looks like this in the Sony 3.5" emulation modes:
 
-MEOWMEOW picture
+![Sony 3.5" status screen with drive empty.](images/09_status_sony_empty.png)
 
 And like this in the dual Twiggy emulation mode:
 
-MEOWMEOW picture
+![Twiggy status screen with drives empty.](images/11_status_twiggy_empty.png)
 
 Notice that it looks pretty bare because you don't have a disk inserted. Let's change that by inserting a disk! In the Sony emulation modes, you can just hit SEL to bring up the file picker for the single Sony drive. In Twiggy mode, notice that one of the Twiggy icons is highlighted white. This is the drive that's currently selected for interaction. Use the LEFT/RIGHT buttons to move the highlight to whichever Twiggy you want to insert a disk into, and then hit SEL to bring up the file picker just like on Sony.
 
@@ -187,11 +189,11 @@ Go read the [File Picker](#the-file-picker) section below to learn how to use it
 
 Okay, so now you should have one or more disks inserted into your drives and the status screen should look something like this in Sony mode:
 
-MEOWMEOW picture
+![Sony status screen with drive loaded.](images/10_status_sony_loaded.png)
 
 Or this in Twiggy mode (assuming disks inserted into both drives):
 
-MEOWMEOW picture
+![Twiggy status screen with drives loaded.](images/12_status_twiggy_loaded.png)
 
 In both emulation modes, you get to see the image name, image type, the current status of the disk (Idle, Read, or Write), and the track/side number that the host computer is currently trying to read/write. The Sony screen has a little more space, so it crams in a little more detail, including a "Buffer dirty!" message that pops up on the empty sixth line whenever a write to the SD card is pending. You'll probably never see the message pop up for more than a few milliseconds at a time, but on the off chance that it stays up for a while, don't turn off or reset the emulator until it goes away unless you want data corruption in your image!
 
@@ -202,7 +204,7 @@ Twiggy is a little different from Sony in that you can actually request an eject
 ### The File Picker
 When you press SEL on the status screen to load a disk image, you get brought here to the file picker. It looks like this:
 
-MEOWMEOW picture
+![File picker in Sony mode.](images/13_picker_sony.png)
 
 Note that the title bar will be slightly different depending on the emulation mode (and which Twiggy you're inserting if you're in Twiggy mode), but otherwise the picker is identical between modes.
 
@@ -223,13 +225,13 @@ There are several error screens that can pop up during use, but realistically th
 
 #### Error: Image file is not contiguous!
 
-MEOWMEOW picture
+!["Image not contiguous" error message.](images/15_err_not_contiguous.png)
 
 This means that your image file doesn't occupy a consecutive set of sectors on the SD card. It's annoying on the Floppy Emu whenever this happens, and it's annoying here too. Unfortunately I have to require contiguous images for the sake of speed, so there's no way around it. This is a common enough error that I made a whole [troubleshooting entry](#i-get-an-error-saying-that-my-image-file-is-not-contiguous-what-does-this-mean-and-how-do-i-fix-it) about it; go read that for a deeper explanation and the fix.
 
 #### Error: Image already loaded in other drive!
 
-MEOWMEOW picture
+!["Image already loaded in other drive" error message.](images/16_err_already_loaded.png)
 
 Unless something goes horribly wrong, you should only ever see this message in Twiggy mode. It'll pop up if you ever try to insert the same disk image into both drives, which obviously isn't allowed because letting two drives write to the same disk at the same time is a recipe for data corruption. Just dismiss the message and insert a different disk.
 

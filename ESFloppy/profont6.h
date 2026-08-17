@@ -20,4 +20,4 @@
 //
 // Metrics: monospace, advance 6, ascent 6, descent 1, band 7, ASCII 32-126.
 
-extern const uint8_t u8g2_font_profont6_tr[894] U8G2_FONT_SECTION("u8g2_font_profont6_tr");
+extern const uint8_t u8g2_font_profont6_tr[884] U8G2_FONT_SECTION("u8g2_font_profont6_tr");

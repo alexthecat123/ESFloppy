@@ -682,7 +682,7 @@ void drawFwUpdateProgress(uint32_t bytesDone, uint32_t bytesTotal, const char* n
     uint32_t progressBarWidth = (bytesDone * OLED.getDisplayWidth()) / bytesTotal;
     OLED.drawBox(0, (MENU_ITEM_HEIGHT + 2) * 2, progressBarWidth, MENU_ITEM_HEIGHT);
     // Draw a "firmware update in progress" icon, centered horizontally and vertically in the space between the progress bar and the "don't power off" warning
-    drawFwUpdateProgressIcon((OLED.getDisplayWidth() - FW_UPDATE_ICON_WIDTH) / 2, (MENU_ITEM_HEIGHT + 2) * 3 + ((((MENU_ITEM_HEIGHT * 7) - ((MENU_ITEM_HEIGHT + 2) * 3)) - FW_ERROR_ICON_HEIGHT) / 2));
+    drawFwUpdateProgressIcon((OLED.getDisplayWidth() - FW_UPDATE_ICON_WIDTH) / 2, (MENU_ITEM_HEIGHT + 2) * 3 + ((((MENU_ITEM_HEIGHT * 7) - ((MENU_ITEM_HEIGHT + 2) * 3)) - FW_UPDATE_ICON_HEIGHT) / 2));
     // And finally, display a "don't power off" warning at the bottom of the screen
     OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Don't turn off!")) / 2), MENU_ITEM_HEIGHT * 7, "Don't turn off!");
     OLED.sendBuffer();
@@ -698,7 +698,7 @@ void drawFwUpdateSuccess(const char* newVersion) {
     snprintf(versionUpdateString, sizeof(versionUpdateString), "%s -> %s", FIRMWARE_VERSION, newVersion);
     OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth(versionUpdateString)) / 2), (MENU_ITEM_HEIGHT + 2) * 1, versionUpdateString);
     // Then display a "success" icon, centered horizontally and vertically in the space between the version string and the SEL prompt
-    drawFwUpdateSuccessIcon((OLED.getDisplayWidth() - FW_SUCCESS_ICON_WIDTH) / 2, (MENU_ITEM_HEIGHT + 2) * 2 + ((((MENU_ITEM_HEIGHT * 7) - ((MENU_ITEM_HEIGHT + 2) * 2)) - FW_ERROR_ICON_HEIGHT) / 2));
+    drawFwUpdateSuccessIcon((OLED.getDisplayWidth() - FW_SUCCESS_ICON_WIDTH) / 2, (MENU_ITEM_HEIGHT + 2) * 2 + ((((MENU_ITEM_HEIGHT * 7) - ((MENU_ITEM_HEIGHT + 2) * 2)) - FW_SUCCESS_ICON_HEIGHT) / 2));
     // And finally, display a "Press SEL to continue" prompt at the bottom of the screen
     OLED.drawStr(((OLED.getDisplayWidth() - OLED.getStrWidth("Press SEL to reboot.")) / 2), MENU_ITEM_HEIGHT * 7, "Press SEL to reboot.");
     OLED.sendBuffer();

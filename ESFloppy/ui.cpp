@@ -377,7 +377,7 @@ static void drawDriveCompact(uint32_t drive, uint32_t y, uint32_t currentTime) {
         OLED.drawStr(nameStartX, y, "No disk!");
         snprintf(buffer, sizeof(buffer), "Pick drive %d and", (int)drive);
         OLED.drawStr(28, y + 2 + (MENU_ITEM_HEIGHT * 1), buffer);
-        OLED.drawStr(28, y + 4 + (MENU_ITEM_HEIGHT * 2), "hit SEL to load...");
+        OLED.drawStr(28, y + 4 + (MENU_ITEM_HEIGHT * 2), "hit SEL to load.");
     }
 }
 
@@ -406,7 +406,7 @@ static void drawDriveExpanded(uint32_t drive, uint32_t y, uint32_t currentTime) 
     if (!metadata->diskInserted) {
         //OLED.drawFrame(3, y + 6, 22, 24);
         OLED.drawStr(0, y, "No disk inserted!");
-        OLED.drawStr(0, y + 1 + (MENU_ITEM_HEIGHT * 1), "Hit SEL to load one...");
+        OLED.drawStr(0, y + 1 + (MENU_ITEM_HEIGHT * 1), "Hit SEL to load one.");
         return; // And that's about it
     }
 
