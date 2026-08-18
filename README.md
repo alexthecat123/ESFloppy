@@ -271,4 +271,4 @@ Feel free to email me at alexelectronicsguy@gmail.com if you need help, find any
 
 
 # Changelog
-8/15/2026 - Initial ESFloppy release. MEOWMEOW CHANGE DATE
+8/18/2026 - Initial ESFloppy 1.0 release.

@@ -42,7 +42,7 @@ void setFreq(uint32_t freq, uint32_t resolution) {
     int numerator = (int)(fractional * 256); 
     // And put the whole and numerator parts together to get our fixed-point number that we can put into the divider register
     uint32_t finalDivider = (whole << 8) | numerator;
-    Serial.printf("Freq: %d, Divider: %d\n", freq, finalDivider);
+    //Serial.printf("Freq: %d, Divider: %d\n", freq, finalDivider);
     // First, set the frequency to that final computed value value
     REG_WRITE(LEDC_TIMER0_CONF_REG, ((REG_READ(LEDC_TIMER0_CONF_REG) & 0xFFC0000F) | (finalDivider << 4)));
     // And then set the timer resolution to whatever's specified in our resolution variable
